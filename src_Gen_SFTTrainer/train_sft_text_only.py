@@ -65,11 +65,15 @@ def create_hf_text_dataset(gen_dataset: GenerationDataset) -> Dataset:
     Dataset to avoid collation errors; they are retained in the raw GenerationDataset
     for later evaluation use.
     """
-    texts = []
+    items = []
     for i in range(len(gen_dataset)):
         sample = gen_dataset[i]   # returns {'text': str, 'prompt_text': str, ...}
-        texts.append({"text": sample["text"]})
-    return Dataset.from_list(texts)
+        items.append({
+            "input_ids":      sample["input_ids"].tolist(),
+            "attention_mask": sample["attention_mask"].tolist(),
+            "labels":         sample["labels"].tolist(),
+        })
+    return Dataset.from_list(items)
 
 
 def load_model_and_tokenizer(config: SFTTrainerConfig):
@@ -228,13 +232,14 @@ def main():
     parser.add_argument("--no_peft", action="store_true", help="Disable LoRA")
 
     # Slide window (used in output folder naming only; must match the preloader)
-    parser.add_argument("--slide_windows", type=int, default=None,
+    parser.add_argument("--slide_windows", type=int, default=3,
                         help="Slide-window size used by the preloader (auto-detected from pkl if not set)")
 
     # Naming
     parser.add_argument("--topic_name", type=str, default="SFT", help="Tag for run name")
     
     args = parser.parse_args()
+    args.semi_supervised = True
     
     # Note: GPU isolation already done at module load time (before torch import)
     # This ensures proper device mapping
@@ -303,7 +308,7 @@ def main():
     # dataset_text_field MUST be "text" so SFTTrainer applies the chat template +
     # causal LM loss over the full sequence.  Setting it to None would disable
     # SFTTrainer's own tokenisation and expect pre-computed input_ids/labels tensors.
-    config.dataset_text_field = "text"
+    config.dataset_text_field = None # "text"
 
     # Create SFTConfig (includes max_seq_length, packing, dataset_text_field)
     print("\n[3/4] Setting up Trainer...")

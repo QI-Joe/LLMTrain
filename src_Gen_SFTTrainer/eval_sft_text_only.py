@@ -186,19 +186,20 @@ class TextOnlyEvaluator:
     
     def calculate_per_sample_ppl(self, logits, labels):
         """Calculate per-sample perplexity"""
-        loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+        # CRITICAL: Must set ignore_index=-100 to properly handle masked labels
+        loss_fct = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
         
         loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
-        mask = shift_labels != -100
+        mask = (shift_labels != -100).float()
         
         counts = mask.sum(dim=1)
-        sums = (loss * mask).sum(dim=1)
+        sums = loss.sum(dim=1)  # loss already has 0 for ignored positions
         per_sample_loss = sums / counts.clamp(min=1)
         per_sample_ppl = torch.exp(per_sample_loss)
         
-        return per_sample_ppl.tolist(), per_sample_loss.tolist()
+        return np.average(per_sample_ppl).item(), np.average(per_sample_loss).item()
     
     def calculate_accuracy(self, logits, labels):
         """Calculate token-level accuracy"""
@@ -252,24 +253,16 @@ class TextOnlyEvaluator:
         for idx in tqdm(range(len(dataset)), desc=f"Eval {split}"):
             sample = dataset[idx]
             
-            full_text = sample['text']
-            prompt_text = sample['prompt_text']
+            input_ids = sample['input_ids']
+            attention_mask = sample['attention_mask']
+            labels = sample['labels']
+            ud_idx, ld_idx = sample['ud_idx'], sample['ld_idx']
+            raw_text = sample['input_data']
             emotion = sample['emotion']
-            ud_idx = sample['ud_idx']
-            ld_idx = sample['ld_idx']
-            
-            # Extract target text (assistant response) from full conversation
-            # The target is what comes after the prompt
-            # We can't directly extract it from text, so we use generation reference
-            # Actually, we need to infer it from the full_text - prompt_text
-            # But chat templates make this complex. Let's use tokenization lengths.
             
             # -----------------------------------------------------------------
             # Pass 1: Forward pass for PPL/Loss/Accuracy
             # -----------------------------------------------------------------
-            input_ids, attention_mask, labels, prompt_len = self.tokenize_with_labels(
-                full_text, prompt_text
-            )
             input_ids = input_ids.to(self.device)
             attention_mask = attention_mask.to(self.device)
             labels = labels.to(self.device)
@@ -284,66 +277,75 @@ class TextOnlyEvaluator:
                 loss_val = outputs.loss.item()
                 acc_val = self.calculate_accuracy(outputs.logits, labels)
                 ppl_vals, loss_list = self.calculate_per_sample_ppl(outputs.logits, labels)
-                ppl_sample = ppl_vals[0]
-                iamm_loss = loss_list[0]
+                ppl_sample = ppl_vals
+                iamm_loss = loss_list
                 all_iamm_losses.append(iamm_loss)
             
             # -----------------------------------------------------------------
             # Pass 2: Generation for BLEU/DIST
             # -----------------------------------------------------------------
-            # Tokenize prompt only for generation
             self.tokenizer.padding_side = 'left'  # Critical for generation!
-            prompt_enc = self.tokenizer(
-                prompt_text,
-                return_tensors='pt',
-                truncation=True,
-                max_length=2048,
-            )
-            prompt_ids = prompt_enc['input_ids'].to(self.device)
-            prompt_mask = prompt_enc['attention_mask'].to(self.device)
             
-            with torch.no_grad():
-                gen_ids = self.model.generate(
-                    prompt_ids,
-                    attention_mask=prompt_mask,
-                    max_new_tokens=max_new_tokens,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    do_sample=do_sample,
-                    top_p=top_p,
-                    temperature=temperature,
+            b1_list, b2_list = list(), list()
+            for idx, item in enumerate(raw_text):
+                if 'system' in item.keys() or 'assistant' in item.keys(): continue
+                current_ctx = raw_text[:idx]
+                input_text = self.tokenizer.apply_chat_template(
+                    current_ctx,
+                    tokenize=False,
+                    add_generation_prompt = True
                 )
-            
-            # Decode generated text
-            gen_len = prompt_ids.shape[1]
-            generated_part = gen_ids[:, gen_len:]
-            pred_text = self.tokenizer.decode(generated_part[0], skip_special_tokens=True).strip()
-            all_pred_sentences.append(pred_text)
-            
-            # Extract reference text (target) from full_text
-            # Decode the labels (non -100 tokens) to get the target
-            target_mask = labels[0] != -100
-            target_ids = input_ids[0][target_mask]
-            target_text = self.tokenizer.decode(target_ids, skip_special_tokens=True).strip()
-            all_ref_sentences.append(target_text)
-            
-            # -----------------------------------------------------------------
-            # Compute BLEU scores
-            # -----------------------------------------------------------------
-            chencherry = SmoothingFunction()
-            pred_toks = word_tokenize(pred_text) if pred_text else []
-            ref_toks = word_tokenize(target_text) if target_text else []
-            
-            if len(ref_toks) == 0:
-                b1, b2 = 0.0, 0.0
-            else:
-                b1 = sentence_bleu(
-                    [ref_toks], pred_toks, weights=(1, 0, 0, 0),
-                    smoothing_function=chencherry.method7
+                prompt_enc = self.tokenizer(
+                    input_text,
+                    return_tensors='pt',
+                    truncation=True,
+                    max_length=2048,
                 )
-                b2 = sentence_bleu(
-                    [ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0),
-                    smoothing_function=chencherry.method7
-                )
+                prompt_ids = prompt_enc['input_ids'].to(self.device)
+                prompt_mask = prompt_enc['attention_mask'].to(self.device)
+                
+                with torch.no_grad():
+                    gen_ids = self.model.generate(
+                        prompt_ids,
+                        attention_mask=prompt_mask,
+                        max_new_tokens=max_new_tokens,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        do_sample=do_sample,
+                        top_p=top_p,
+                        temperature=temperature,
+                    )
+            
+                # Decode generated text
+                gen_len = prompt_ids.shape[1]
+                generated_part = gen_ids[:, gen_len:]
+                pred_text = self.tokenizer.decode(generated_part[0], skip_special_tokens=True).strip()
+                all_pred_sentences.append(pred_text)
+                
+                # Extract reference text (target) from full_text
+                # Decode the labels (non -100 tokens) to get the target
+                target_text = raw_text[idx+1]['content']
+                all_ref_sentences.append(target_text)
+                
+                # -----------------------------------------------------------------
+                # Compute BLEU scores
+                # -----------------------------------------------------------------
+                chencherry = SmoothingFunction()
+                pred_toks = word_tokenize(pred_text) if pred_text else []
+                ref_toks = word_tokenize(target_text) if target_text else []
+                
+                if len(ref_toks) == 0:
+                    b1, b2 = 0.0, 0.0
+                else:
+                    b1 = sentence_bleu(
+                        [ref_toks], pred_toks, weights=(1, 0, 0, 0),
+                        smoothing_function=chencherry.method7
+                    )
+                    b2 = sentence_bleu(
+                        [ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0),
+                        smoothing_function=chencherry.method7
+                    )
+                b1_list.append(b1)
+                b2_list.append(b2)
             
             result = {
                 "split": split,
@@ -354,8 +356,8 @@ class TextOnlyEvaluator:
                     "ppl": ppl_sample,
                     "loss": loss_val,
                     "acc": acc_val,
-                    "bleu-1": b1,
-                    "bleu-2": b2,
+                    "bleu-1": sum(b1)/len(b1),
+                    "bleu-2": sum(b2)/len(b2),
                 },
                 "generated": pred_text,
                 "target": target_text,

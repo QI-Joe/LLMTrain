@@ -40,15 +40,19 @@ def calculate_accuracy(logits, labels):
     return accuracy.item()
 
 def calculate_per_sample_ppl(logits, labels):
-    loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+    # CRITICAL: Must set ignore_index=-100 to properly handle masked labels
+    # Without this, loss for -100 positions is undefined (index out of vocab range)
+    loss_fct = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous()
     # [Batch, Seq-1]
     loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
-    mask = shift_labels != -100
+    # With ignore_index=-100, loss for ignored positions is already 0
+    # Mask is still needed to count valid tokens
+    mask = (shift_labels != -100).float()
     # Avoid div by zero
     counts = mask.sum(dim=1)
-    sums = (loss * mask).sum(dim=1)
+    sums = loss.sum(dim=1)  # loss already has 0 for ignored positions
     per_sample_loss = sums / counts.clamp(min=1)
     # If count is 0, ppl is technically undefined, set to 0 or 1? 
     # Let's keep distinct, but usually implies padding only.

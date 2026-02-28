@@ -104,7 +104,7 @@ class GenerationDataset(Dataset):
 
     def __len__(self):
         return len(self.indices)
-    
+
     def __getitem__(self, idx):
         real_idx = self.indices[idx]
 
@@ -116,26 +116,112 @@ class GenerationDataset(Dataset):
                 f"got {type(input_data)}. Re-run preload_gen_data_user_assist_turn.py."
             )
 
-        # -- Full conversation string (system + history + last assistant turn) --------
-        # The last message in input_data IS the assistant response being trained on.
-        # SFTTrainer receives this full string and handles tokenisation + loss.
+        # ── 1. Full conversation string ──────────────────────────────────────────────
+        # apply_chat_template already injects <|begin_of_text|>, role headers, and EOS
+        # so we MUST use add_special_tokens=False when calling the tokenizer directly.
         full_text = self.tokenizer.apply_chat_template(
             input_data, tokenize=False, add_generation_prompt=False
         )
 
-        # -- Prompt-only string (everything except the last assistant message) --------
-        # Useful for inference / evaluation; not used during SFTTrainer training.
-        prompt_str = self.tokenizer.apply_chat_template(
-            input_data[:-1], tokenize=False, add_generation_prompt=True
+        encoding = self.tokenizer(
+            full_text,
+            max_length=self.max_seq_len,
+            truncation=True,
+            padding=False,
+            add_special_tokens=False,   # BOS/EOS already in the template string
+            return_tensors=None,
         )
+        input_ids      = encoding["input_ids"]
+        attention_mask = encoding["attention_mask"]
+
+        # ── 2. Build label mask ──────────────────────────────────────────────────────
+        # Default: -100 everywhere (mask system prompt + all user turns).
+        # Only assistant-response tokens are unmasked and used for loss.
+        labels = [-100] * len(input_ids)
+
+        for i, msg in enumerate(input_data):
+            if msg["role"] != "assistant":
+                continue  # system / user → stay masked
+
+            # -- Start boundary: prefix up to (but not including) this assistant turn.
+            #    add_generation_prompt=True appends the assistant role header token(s),
+            #    so prefix_len points to the first token of the assistant's *content*.
+            prefix_text = self.tokenizer.apply_chat_template(
+                input_data[:i], tokenize=False, add_generation_prompt=True
+            )
+            prefix_len = len(self.tokenizer(
+                prefix_text, add_special_tokens=False, return_tensors=None
+            )["input_ids"])
+
+            # -- End boundary: full text up to and including this assistant turn.
+            full_up_to = self.tokenizer.apply_chat_template(
+                input_data[: i + 1], tokenize=False, add_generation_prompt=False
+            )
+            end_len = len(self.tokenizer(
+                full_up_to, add_special_tokens=False, return_tensors=None
+            )["input_ids"])
+
+            # Unmask assistant-content tokens (clamped to actual sequence length)
+            for j in range(prefix_len, min(end_len, len(input_ids))):
+                labels[j] = input_ids[j]
+
+        # ── 3. Prompt-only string (kept for inference / custom evaluation) ───────────
+        # System + history up to last user turn, with add_generation_prompt=True so
+        # the model can directly continue with its generation at eval time.
+        # NOTE: system prompt is intentionally included here — it frames the task
+        # and is required context; it is simply *not* predicted (masked above).
 
         return {
-            "text":        full_text,    # SFTTrainer trains on this
-            "prompt_text": prompt_str,   # Kept for eval/logging only
-            "emotion":     self.data['emotion'][real_idx],
-            "ud_idx":      self.data['ud_idx'][real_idx],
-            "ld_idx":      self.data['ld_idx'][real_idx],
+            "input_ids":       torch.tensor(input_ids,      dtype=torch.long),
+            "attention_mask":  torch.tensor(attention_mask, dtype=torch.long),
+            "labels":          torch.tensor(labels,         dtype=torch.long),
+            "text":            input_data,  
+            "emotion":         self.data["emotion"][real_idx],
+            "ud_idx":          self.data["ud_idx"][real_idx],
+            "ld_idx":          self.data["ld_idx"][real_idx],
         }
+
+def gen_collate_fn(batch, pad_token_id: int = 0):
+    """
+    Custom collate function for GenerationDataset.
+
+    Pads tensor fields (input_ids / attention_mask / labels) to the longest
+    sequence in the batch; string / scalar metadata fields are collected into
+    plain lists so they pass through the DataLoader without errors.
+
+    Args:
+        batch:         list of dicts returned by GenerationDataset.__getitem__
+        pad_token_id:  token id used for right-padding input_ids & attention_mask
+                       (labels padding is always -100 so it is ignored by the loss)
+    """
+    # Separate tensor fields from string/scalar metadata
+    input_ids_list      = [item["input_ids"]      for item in batch]
+    attention_mask_list = [item["attention_mask"]  for item in batch]
+    labels_list         = [item["labels"]          for item in batch]
+    text_list           = [item["text"]            for item in batch]
+
+    max_len = max(t.size(0) for t in input_ids_list)
+
+    def pad_tensor(tensor, pad_value, target_len):
+        pad_size = target_len - tensor.size(0)
+        if pad_size == 0:
+            return tensor
+        return torch.cat([tensor, torch.full((pad_size,), pad_value, dtype=tensor.dtype)])
+
+    input_ids      = torch.stack([pad_tensor(t, pad_token_id, max_len) for t in input_ids_list])
+    attention_mask = torch.stack([pad_tensor(t, 0,             max_len) for t in attention_mask_list])
+    labels         = torch.stack([pad_tensor(t, -100,          max_len) for t in labels_list])
+
+    return {
+        "input_ids":      input_ids,       # (B, max_len)
+        "attention_mask": attention_mask,  # (B, max_len)
+        "labels":         labels,          # (B, max_len)  — -100 positions ignored by loss
+        "text":    [item["text"] for item in batch],
+        "emotion":        [item["emotion"]     for item in batch],
+        "ud_idx":         [item["ud_idx"]      for item in batch],
+        "ld_idx":         [item["ld_idx"]      for item in batch],
+    }
+
 
 def gen_loader_warp(data, tokenizer, config: GenTrainingConfig):
     """
@@ -159,18 +245,11 @@ def gen_loader_warp(data, tokenizer, config: GenTrainingConfig):
         # Full train
         if config.fast_train:
             num_blocks = len(all_block_idx)
-            perm = np.random.permutation(num_blocks) # Or sorted for stability
             # If Fast Train -> maybe smaller subset
             split1 = int(0.8 * num_blocks)
-            split2 = int(0.9 * num_blocks)
-            
-            # This is naive. Ideally should respect original split if possible.
-            # But for this task, following the 'loader_warp' existing logic pattern:
             train_blocks = list(all_block_idx[:split1])
-            pass
 
     # 3. Val/Test Split
-    # Remove train blocks
     remaining = sorted(list(set(all_block_idx) - set(train_blocks)))
     
     val_blocks = []
@@ -179,11 +258,6 @@ def gen_loader_warp(data, tokenizer, config: GenTrainingConfig):
     if config.fast_train:
         # Scenario 1: Fast Train is True
         # "valid and test should all be setup as 10 percent"
-        # We apply this 10% logic to the TOTAL available blocks if possible, 
-        # or just 10% of remaining if that's what's meant. 
-        # Given "fast train", we usually want a small subset. 
-        # Let's interpret as: Use 10% of TOTAL for Val and 10% of TOTAL for Test.
-        
         num_total = len(all_block_idx)
         n_val = int(num_total * 0.1)
         n_test = int(num_total * 0.1)
@@ -198,13 +272,6 @@ def gen_loader_warp(data, tokenizer, config: GenTrainingConfig):
         else:
              val_blocks = remaining[:n_val]
              test_blocks = remaining[n_val : n_val + n_test]
-             
-        # Also limit Train blocks if user meant "fast train" implies small dataset?
-        # Re-reading: "under fast-train is True... valid and test ... 10 percent"
-        # It doesn't explicitly restrict Train size, but usually fast_train does.
-        # Existing logic for Full Train+Fast Train sliced top 80%.
-        # If FSL/SSL, Train is already small.
-        # So we just ensure Val/Test are 10%.
         
     else:
         # Scenario 2: Fast Train is False
@@ -244,11 +311,17 @@ def gen_loader_warp(data, tokenizer, config: GenTrainingConfig):
     test_ds  = GenerationDataset.from_block_indices(data, tokenizer, config.max_seq_length, test_blocks,  config.prompt_key)
     
     raw_ds = (train_ds, val_ds, test_ds)
+
+    train_loader, val_loader, test_loader = None, None, None
+
+    # 5. Loaders — use gen_collate_fn to handle padding and mixed tensor/string fields
+    # pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    # from functools import partial
+    # collate = partial(gen_collate_fn, pad_token_id=pad_id)
     
-    # 5. Loaders
-    train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers)
-    val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers)
-    test_loader = DataLoader(test_ds, batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers)
+    # train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers, collate_fn=collate)
+    # val_loader   = DataLoader(val_ds,   batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers, collate_fn=collate)
+    # test_loader  = DataLoader(test_ds,  batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers, collate_fn=collate)
     
     return train_loader, val_loader, test_loader, raw_ds
 

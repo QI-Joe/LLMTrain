@@ -95,15 +95,16 @@ def calculate_accuracy(logits, labels):
 
 def calculate_per_sample_ppl(logits, labels):
     """Calculate per-sample perplexity"""
-    loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+    # CRITICAL: Must set ignore_index=-100 to properly handle masked labels
+    loss_fct = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous()
     
     loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
-    mask = shift_labels != -100
+    mask = (shift_labels != -100).float()
     
     counts = mask.sum(dim=1)
-    sums = (loss * mask).sum(dim=1)
+    sums = loss.sum(dim=1)  # loss already has 0 for ignored positions
     per_sample_loss = sums / counts.clamp(min=1)
     per_sample_ppl = torch.exp(per_sample_loss)
     
@@ -116,14 +117,15 @@ def iamm_ppl_loss_list(logits, labels):
     Returns list of mean NLL per sample.
     Final PPL = exp(mean(all_sample_losses))
     """
-    loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+    # CRITICAL: Must set ignore_index=-100 to properly handle masked labels
+    loss_fct = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous()
     
     loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
     mask = (shift_labels != -100).float()
     
-    sample_sums = (loss * mask).sum(dim=1)
+    sample_sums = loss.sum(dim=1)  # loss already has 0 for ignored positions
     sample_counts = mask.sum(dim=1).clamp(min=1)
     sample_means = sample_sums / sample_counts
     

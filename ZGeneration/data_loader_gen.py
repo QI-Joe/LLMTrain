@@ -203,15 +203,9 @@ def gen_loader_warp(data, tokenizer, config: GenTrainingConfig):
         # Full train
         if config.fast_train:
             num_blocks = len(all_block_idx)
-            perm = np.random.permutation(num_blocks) # Or sorted for stability
             # If Fast Train -> maybe smaller subset
             split1 = int(0.8 * num_blocks)
-            split2 = int(0.9 * num_blocks)
-            
-            # This is naive. Ideally should respect original split if possible.
-            # But for this task, following the 'loader_warp' existing logic pattern:
             train_blocks = list(all_block_idx[:split1])
-            pass
 
     # 3. Val/Test Split
     # Remove train blocks

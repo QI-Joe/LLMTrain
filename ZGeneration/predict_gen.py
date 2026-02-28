@@ -58,15 +58,17 @@ def calculate_accuracy(logits, labels):
     return accuracy.item()
 
 def calculate_per_sample_ppl(logits, labels):
-    loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+    # CRITICAL: Must set ignore_index=-100 to properly handle masked labels
+    loss_fct = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous()
     # [Batch, Seq-1]
     loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
-    mask = shift_labels != -100
+    # With ignore_index=-100, loss for ignored positions is already 0
+    mask = (shift_labels != -100).float()
     # Avoid div by zero
     counts = mask.sum(dim=1)
-    sums = (loss * mask).sum(dim=1)
+    sums = loss.sum(dim=1)  # loss already has 0 for ignored positions
     per_sample_loss = sums / counts.clamp(min=1)
     # If count is 0, ppl is technically undefined, set to 0 or 1? 
     # Let's keep distinct, but usually implies padding only.
@@ -85,24 +87,24 @@ def IAMM_ppl_loss_list(logits, labels):
     Our model outputs raw logits.
     CrossEntropyLoss(logits) == NLLLoss(LogSoftmax(logits)).
     """
-    loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+    # CRITICAL: Must set ignore_index=-100 to properly handle masked labels
+    loss_fct = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
     
     # [Batch, Seq-1, Vocab]
     shift_logits = logits[..., :-1, :].contiguous()
     # [Batch, Seq-1]
     shift_labels = labels[..., 1:].contiguous()
 
-    # Flatten for API compatibility if needed, but reduction='none' works on (N, C, L) or (N, L)?
     # CrossEntropyLoss expects (N, C, d1...) for logits and (N, d1...) for targets.
     # We transpose logits to [Batch, Vocab, Seq-1]
     loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
     
-    # loss is now [Batch, Seq-1] of NLLs
+    # loss is now [Batch, Seq-1] of NLLs (0 for ignored positions)
     
     mask = (shift_labels != -100).float()
     
-    # Sum loss per sample
-    sample_sums = (loss * mask).sum(dim=1)
+    # Sum loss per sample (loss already 0 for ignored positions)
+    sample_sums = loss.sum(dim=1)
     # Count tokens per sample
     sample_counts = mask.sum(dim=1).clamp(min=1)
     
@@ -232,7 +234,7 @@ class GenerationEval:
         if self.checkpoint_dir:
             self.logger.info(f"Loading Checkpoint from {self.checkpoint_dir}")
             # check for checkpoint.pt (custom save) or adapter (standard peft)
-            pt_path = os.path.join(self.checkpoint_dir, 'checkpoint.pt')
+            pt_path = os.path.join(self.checkpoint_dir, 'checkpoint.pt') # has bugs
             
             if os.path.exists(pt_path):
                 # Custom full state or mixed state load
@@ -539,8 +541,9 @@ def main():
     parser.add_argument("--checkpoint_dir", type=str, default='outputs/Qwen3_02-21/method_SSP02_bs_2_inputdata_input_text_Qwen4B_SSL/checkpoints/checkpoint-epoch-4', help="Checkpoint directory to load model from")
     
     args = parser.parse_args()
-    args.semi_supervised = True
-    args.fast_train = True
+    # args.semi_supervised = True
+    # args.fast_train = True
+    # args.raw_model = True
     
     # Init Config
     config = GenTrainingConfig()
