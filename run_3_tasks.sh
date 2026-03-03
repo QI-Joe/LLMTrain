@@ -32,18 +32,18 @@ echo "Starting Multi-Task Training Run at $TIMESTAMP"
 #     --cuda_device 0 \
 #     --topic_name "Llama3_SSL" \
 #     --experiment_name "Multi_Run_${TIMESTAMP}" \
-#     --semi_supervised \
-#     --semi_ratio 0.1 \
 #     --batch_size 2 \
 #     --gradient_accumulation_steps 2 \
 #     --num_epochs 5 \
 #     --learning_rate 2e-5 \
 #     --max_seq_length 2048 \
-#     --max_new_tokens 150 \
-#     --val_ratio 0.2 \
-#     --test_ratio 0.2\ 
-#     # --few_shot \
-#     # --shots_per_class 32 \
+#     --max_new_tokens 50 \
+#     --val_ratio 0.04 \
+#     --test_ratio 0.04 \
+#     --few_shot \
+#     --shots_per_class 4 \
+    # --semi_supervised \
+    # --semi_ratio 0.01 \
 
 # --- Task 2: Qwen 4B FSL (32 Shots) ---
 # Run on GPU 1 (assuming available)
@@ -55,35 +55,35 @@ env CUDA_VISIBLE_DEVICES=1 python3 ZGeneration/train_gen.py \
     --experiment_name "Multi_Run_${TIMESTAMP}" \
     --batch_size 2 \
     --gradient_accumulation_steps 2 \
-    --num_epochs 5 \
+    --num_epochs 3 \
     --learning_rate 2e-5 \
     --max_seq_length 2183 \
-    --max_new_tokens 150 \
-    --val_ratio 0.2 \
-    --test_ratio 0.4 \
+    --max_new_tokens 50 \
+    --val_ratio 0.04 \
+    --test_ratio 0.04 \
     --few_shot \
-    --shots_per_class 32 \
+    --shots_per_class 4 \
     # --semi_supervised \
     # --semi_ratio 0.1 \
 
 # --- Task 3: Qwen 4B Semi-Supervised (SSL) ---
 # Concurrent with Task 2 on GPU 1
 start "task3_Llama31_FSL16" \
-env CUDA_VISIBLE_DEVICES=3 python3 ZGeneration/train_gen.py \
+env CUDA_VISIBLE_DEVICES=2 python3 ZGeneration/train_gen.py \
     --model_name "llama3.1-8B-Instruct" \
-    --cuda_device 3 \
+    --cuda_device 2 \
     --topic_name "Llama3.1_FSL16" \
     --experiment_name "Multi_Run_${TIMESTAMP}" \
-    --val_ratio 0.2 \
-    --test_ratio 0.4 \
+    --val_ratio 0.04 \
+    --test_ratio 0.04 \
     --batch_size 2 \
     --gradient_accumulation_steps 2 \
     --num_epochs 5 \
     --learning_rate 2e-5 \
     --max_seq_length 2183 \
-    --max_new_tokens 150 \
+    --max_new_tokens 50 \
     --few_shot \
-    --shots_per_class 32 \
+    --shots_per_class 4 \
     # --semi_supervised \
     # --semi_ratio 0.1 \
 
