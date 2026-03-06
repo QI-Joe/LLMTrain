@@ -95,14 +95,14 @@ class GenerationDataset(Dataset):
             
             # 1. Full Sequence (Input + Target) for Training
             # apply_chat_template handles concatenation and special tokens
-            full_input_str = self.tokenizer.apply_chat_template(input_data, tokenize=False)
+            full_input_str = self.tokenizer.apply_chat_template(input_data, tokenize=False, enable_thinking=False)
             full_tokens = self.tokenizer(full_input_str, add_special_tokens=False, return_tensors='pt')
             full_input_ids = full_tokens['input_ids'].squeeze(0)
             
             # 2. Prompt Sequence (Input Only) for Inference/Masking
             # Remove the last message (Assistant Target) to get the prompt
             prompt_data = input_data[:-1]
-            prompt_str = self.tokenizer.apply_chat_template(prompt_data, tokenize=False, add_generation_prompt=True)
+            prompt_str = self.tokenizer.apply_chat_template(prompt_data, tokenize=False, add_generation_prompt=True, enable_thinking=False)
             prompt_tokens = self.tokenizer(prompt_str, add_special_tokens=False, return_tensors='pt')
             prompt_ids = prompt_tokens['input_ids'].squeeze(0)
             
@@ -139,7 +139,7 @@ class GenerationDataset(Dataset):
         # 1. Pad Prompt (prompt_ids) to max_seq_len 
         # CRITICAL: Use LEFT PADDING for generation prompts. 
         # This ensures that generation starts immediately after the real tokens.
-        
+        assert self.tokenizer.pad_token_id != self.tokenizer.eos_token_ids, f"Expected pad token not shared with eos token; PAD {self.tokenizer.pad_token_ids} EOS {self.tokenizer.eos_token_id}"
         prompt_input_ids = prompt_ids.clone()
         if len(prompt_input_ids) > self.max_seq_len:
              # Truncate left (keep last context)

@@ -273,8 +273,8 @@ class GenerationTrainer:
                         # But also check simple exact match ratio or unigram overlap without penalty to debug.
                         
                         # Trying Method 7 as it interpolates methods 4 and 5 (length smoothing + average counts)
-                        b1 = sentence_bleu([ref_toks], pred_toks, weights=(1, 0, 0, 0), smoothing_function=chencherry.method7)
-                        b2 = sentence_bleu([ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0), smoothing_function=chencherry.method7)
+                        b1 = sentence_bleu([ref_toks], pred_toks, weights=(1, 0, 0, 0), )
+                        b2 = sentence_bleu([ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0),)
                     
                     # Store Result
                     # ud_idx and ld_idx are tensors from dataloader

@@ -293,7 +293,8 @@ class TextOnlyEvaluator:
                 input_text = self.tokenizer.apply_chat_template(
                     current_ctx,
                     tokenize=False,
-                    add_generation_prompt = True
+                    add_generation_prompt=True,
+                    enable_thinking=False  # Disable Qwen3 thinking mode; ignored by Llama
                 )
                 prompt_enc = self.tokenizer(
                     input_text,
@@ -338,11 +339,9 @@ class TextOnlyEvaluator:
                 else:
                     b1 = sentence_bleu(
                         [ref_toks], pred_toks, weights=(1, 0, 0, 0),
-                        smoothing_function=chencherry.method7
                     )
                     b2 = sentence_bleu(
                         [ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0),
-                        smoothing_function=chencherry.method7
                     )
                 b1_list.append(b1)
                 b2_list.append(b2)

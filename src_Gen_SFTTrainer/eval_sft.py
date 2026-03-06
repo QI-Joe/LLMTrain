@@ -322,8 +322,8 @@ def evaluate(model, tokenizer, dataset: GenerationDataset, config: SFTTrainerCon
             if len(ref_toks) == 0:
                 b1, b2 = 0.0, 0.0
             else:
-                b1 = sentence_bleu([ref_toks], pred_toks, weights=(1, 0, 0, 0), smoothing_function=chencherry.method7)
-                b2 = sentence_bleu([ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0), smoothing_function=chencherry.method7)
+                b1 = sentence_bleu([ref_toks], pred_toks, weights=(1, 0, 0, 0), )
+                b2 = sentence_bleu([ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0),)
             
             result = {
                 "split": split,

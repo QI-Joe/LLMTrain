@@ -170,8 +170,8 @@ def clip_dialogue_window(context_list: Dict[str, List[List[str]]], tokenizer, re
             "content": f"History: {past_history}\nContext: [Asker: {syswords}] [User: {context}]",
         }]
         
-        ws_prompt = tokenizer.apply_chat_template(ws_messages, tokenize=False, add_generation_prompt=True)
-        wo_prompt = tokenizer.apply_chat_template(wo_messages, tokenize=False, add_generation_prompt=True)
+        ws_prompt = tokenizer.apply_chat_template(ws_messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        wo_prompt = tokenizer.apply_chat_template(wo_messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
         
         processed_data.append({
             'ws_prompt': ws_prompt,

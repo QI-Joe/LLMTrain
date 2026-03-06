@@ -42,11 +42,11 @@ class GenModelLoader(nn.Module):
             trust_remote_code=True
         )
         
-        # Enforce Pad Token if missing (crucial for generation)
         if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+            # tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
             
-        tokenizer.padding_side = 'left' # Better for generation usually, but training implies right padding often.
+        tokenizer.padding_side = 'right' # Better for generation usually, but training implies right padding often.
         # tokenizer.padding_side = 'right'
 
         # BitsAndBytes Config (Enforced)
@@ -75,7 +75,13 @@ class GenModelLoader(nn.Module):
             torch_dtype=torch.float16, 
         )
         
-        # Apply LoRA
+        # CRITICAL: Always resize embeddings if pad token was added (vocab size changed)
+        # This must happen BEFORE LoRA to ensure base model embeddings match tokenizer
+        if tokenizer.pad_token == '<|pad|>':
+            model.resize_token_embeddings(len(tokenizer))
+            print(f"Resized model embeddings: {model.get_input_embeddings().weight.shape[0]} to match tokenizer vocab size: {len(tokenizer)}")
+        
+        # Apply LoRA (only for fine-tuning, not raw model)
         if not raw_model:
             model = self._apply_lora(model)
         

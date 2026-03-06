@@ -212,13 +212,6 @@ class GenerationEval:
                          pass
             
              if loaded_config:
-                 # Update self.config with critical structure params if they exist
-                 # But prefer args if explicitly set?
-                 # Actually, usually args override config, but for model structure (max_seq_len), 
-                 # we should probably trust the trained config if args are default.
-                 # For simplicity, let's just log it for now or update if needed.
-                 # The user didn't explicitly ask for this, but it's good practice.
-                 # Update max_seq_length if present
                  if 'max_seq_length' in loaded_config:
                      self.logger.info(f"Overriding max_seq_length from {self.config.max_seq_length} to {loaded_config['max_seq_length']}")
                      self.config.max_seq_length = loaded_config['max_seq_length']
@@ -338,6 +331,9 @@ class GenerationEval:
                 batch_loss_mean.append(loss_val)
                 batch_acc_mean.append(acc_val)
                 
+                # Update progress bar with current metrics
+                pbar.set_postfix({'loss': f'{loss_val:.4f}', 'acc': f'{acc_val:.4f}'})
+                
                 # Generation
                 # Unwrapped generate call
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
@@ -388,8 +384,8 @@ class GenerationEval:
                         # But also check simple exact match ratio or unigram overlap without penalty to debug.
                         
                         # Trying Method 7 as it interpolates methods 4 and 5 (length smoothing + average counts)
-                        b1 = sentence_bleu([ref_toks], pred_toks, weights=(1, 0, 0, 0), smoothing_function=chencherry.method7)
-                        b2 = sentence_bleu([ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0), smoothing_function=chencherry.method7)
+                        b1 = sentence_bleu([ref_toks], pred_toks, weights=(1, 0, 0, 0), )
+                        b2 = sentence_bleu([ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0),)
                     
                     # Store Result
                     # ud_idx and ld_idx are tensors from dataloader
@@ -403,7 +399,6 @@ class GenerationEval:
                             "acc": acc_val, # Shared for batch
                             "bleu-1": b1,
                             "bleu-2": b2
-                            # dist-1/2 removed for per-sample logging as they are corpus metrics
                         },
                         "generated": pred_t,
                         "target": ref_t
@@ -456,7 +451,7 @@ class GenerationEval:
         filename = f"eval_results_{strategy}_{param}_{prefix}.jsonl"
         
         # If checkpoint_dir is provided, save to checkpoint_dir/../../eval_logs/
-        if self.checkpoint_dir and not self.config.raw_model:
+        if self.checkpoint_dir or not self.config.raw_model:
             # Assuming checkpoint_dir is like .../run_name/checkpoints/checkpoint-X or .../run_name/last_checkpoint
             # We want .../run_name/eval_logs/
             
@@ -536,14 +531,14 @@ def main():
     parser.add_argument("--test_ratio", type=float, default=0.2, help="Ratio for Test set (if not fast_train)")
 
     # --- 5. Generation Specifics ---
-    parser.add_argument("--max_new_tokens", type=int, default=150, help="Max tokens to generate during eval")
+    parser.add_argument("--max_new_tokens", type=int, default=15, help="Max tokens to generate during eval")
     parser.add_argument("--gen_temperature", type=float, default=0.7, help="Sampling temperature")
     parser.add_argument("--checkpoint_dir", type=str, default='outputs/Qwen3_02-21/method_SSP02_bs_2_inputdata_input_text_Qwen4B_SSL/checkpoints/checkpoint-epoch-4', help="Checkpoint directory to load model from")
     
     args = parser.parse_args()
-    # args.semi_supervised = True
-    # args.fast_train = True
-    # args.raw_model = True
+    args.semi_supervised = True
+    args.fast_train = True
+    args.raw_model = True
     
     # Init Config
     config = GenTrainingConfig()
