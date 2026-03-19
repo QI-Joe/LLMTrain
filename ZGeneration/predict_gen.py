@@ -529,6 +529,7 @@ def main():
     parser.add_argument("--semi_ratio", type=float, default=0.1, help="Ratio for SSL")
     parser.add_argument("--val_ratio", type=float, default=0.2, help="Ratio for Validation set (if not fast_train)")
     parser.add_argument("--test_ratio", type=float, default=0.2, help="Ratio for Test set (if not fast_train)")
+    # parser.add_argument('--debug_mode', type=bool, action='store_false', default=True, help='used for key parameter setting in debug mode, otherwise hard to activate')
 
     # --- 5. Generation Specifics ---
     parser.add_argument("--max_new_tokens", type=int, default=15, help="Max tokens to generate during eval")
@@ -536,9 +537,11 @@ def main():
     parser.add_argument("--checkpoint_dir", type=str, default='outputs/Qwen3_02-21/method_SSP02_bs_2_inputdata_input_text_Qwen4B_SSL/checkpoints/checkpoint-epoch-4', help="Checkpoint directory to load model from")
     
     args = parser.parse_args()
-    args.semi_supervised = True
-    args.fast_train = True
-    args.raw_model = True
+    
+    # if args.debug_mode:
+    # args.semi_supervised = True
+    # args.fast_train = True
+    # args.raw_model = True
     
     # Init Config
     config = GenTrainingConfig()

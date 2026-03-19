@@ -19,6 +19,7 @@ from ZGeneration.config_gen import GenTrainingConfig
 from src.utils.data.loader import prepare_data_seq
 from ZGeneration.model_loader_gen import GenModelLoader
 from utils_llama3 import setup_logger, set_seed
+from typing import Tuple, Dict, List, Optional, Any
 
 # Ensure NLTK data (lite check)
 try:
@@ -65,16 +66,14 @@ def calculate_per_sample_ppl(logits, labels):
 class GenerationTrainer:
     def __init__(self, config: GenTrainingConfig):
         # 0. GPU Isolation (Must be before Accelerator)
+        # Fix: Instead of forcing CUDA_VISIBLE_DEVICES which remaps everything to cuda:0,
+        # we set the torch default device. This preserves the device index logic for the user.
         if config.cuda_device is not None:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(config.cuda_device)
-            # Map internal usage to cuda:0 since it is the only visible one
-            # CRITICAL FIX: When CUDA_VISIBLE_DEVICES is set to a single ID, that GPU becomes 'cuda:0'
-            
-            # self.internal_device_str = f"cuda:{config.cuda_device}"
-            self.internal_device_str = "cuda:0"
+            torch.cuda.set_device(config.cuda_device)
+            self.internal_device_str = f"cuda:{config.cuda_device}"
         else:
-            self.internal_device_str = config.device
-
+            self.internal_device_str = config.device 
+            
         # 1. Init Accelerator
         self.accelerator = Accelerator(
             mixed_precision='fp16' if config.fp16 else 'no',
@@ -103,7 +102,7 @@ class GenerationTrainer:
         # 2. Load Model & Tokenizer
         self.logger.info("Loading Model...")
         # Note: GenModelLoader enforces quant=True
-        loader = GenModelLoader(self.config.model_name, self.internal_device_str)
+        loader = GenModelLoader(self.config.model_name, self.internal_device_str, self.accelerator)
         self.model, self.tokenizer = loader.start()
         global PAD_TOKEN
         PAD_TOKEN = self.tokenizer.pad_token_id
@@ -143,7 +142,8 @@ class GenerationTrainer:
                     outputs = self.model(
                         input_ids=batch['input_batch'], 
                         attention_mask=batch['attention_mask'], 
-                        labels=batch['labels']
+                        labels=batch['labels'],
+                        output_hidden_states=True,
                     )
                     loss = outputs.loss
                     
@@ -353,7 +353,7 @@ def main():
     
     # --- 1. Model & Hardware ---
     parser.add_argument("--model_name", type=str, default="Llama-3.3-8B-Instruct", help="Model path")
-    parser.add_argument("--cuda_device", type=int, default=3, help="GPU ID to use")
+    parser.add_argument("--cuda_device", type=int, default=1, help="GPU ID to use")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     
     # --- 2. Data & Paths ---

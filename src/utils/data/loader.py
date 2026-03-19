@@ -462,6 +462,17 @@ def collate_fn(data, pad_token_id=0):
             padded_seqs[i, :end] = seq[:end]
         return padded_seqs, lengths
 
+    def left_merge(sequences, pad_id):
+        lengths = [len(seq) for seq in sequences]
+        max_len = max(lengths)
+        padded_seqs = torch.full(
+            (len(sequences), max_len), pad_id, dtype=torch.long
+        )  ## left padding with pad_token_id
+        for i, seq in enumerate(sequences):
+            length = lengths[i]
+            padded_seqs[i, max_len - length:] = seq[:length]
+        return padded_seqs, lengths
+
     def context_merge(sequences, pad_id):
         """Merge list of list of tensors (for commonsense data)."""
         lengths = [[len(seq) for seq in ss] for ss in sequences]
@@ -488,7 +499,7 @@ def collate_fn(data, pad_token_id=0):
     labels, _ = merge(labels, -100)
     
     prompt_toks = item_info['prompt_ids']
-    prompt_batch, prompt_lengths = merge(prompt_toks, pad_token_id)
+    prompt_batch, prompt_lengths = left_merge(prompt_toks, pad_token_id)
     prompt_mask = prompt_batch!=pad_token_id
 
     ## emotion context
@@ -506,6 +517,7 @@ def collate_fn(data, pad_token_id=0):
     situation_batch = situation_batch.to(config.device)
     prompt_batch = prompt_batch.to(config.device)
     prompt_mask = prompt_mask.to(config.device)
+    labels = labels.to(config.device)    
     
     d = {}
     d["input_batch"] = input_batch
@@ -515,11 +527,11 @@ def collate_fn(data, pad_token_id=0):
     d['prompt_ids'], d['prompt_mask'] = prompt_batch, prompt_mask # modify;
     
     d["target_batch"] = target_batch
-    d["target_lengths"] = torch.LongTensor(target_lengths)
+    d["target_lengths"] = torch.LongTensor(target_lengths).to(config.device)
     d["emotion_context_batch"] = emotion_batch.to(config.device) 
 
     d["situation_batch"] = situation_batch
-    d["situation_lengths"] = torch.LongTensor(situation_lengths)
+    d["situation_lengths"] = torch.LongTensor(situation_lengths).to(config.device)
 
     ## program (emotion)
     d["target_program"] = item_info["emotion"]

@@ -179,8 +179,8 @@ class GenerationTrainer:
             else:
                  # During final epoch, run both val and test and save together
                  self.logger.info("Final Epoch detected. Running Combined Validation & Test Evaluation...")
-                 val_results = self.evaluate_epoch(epoch, self.val_loader, "val", save=True)
-                 test_results = self.evaluate_epoch(epoch, self.test_loader, "test", save=True)
+                #  val_results = self.evaluate_epoch(epoch, self.val_loader, "val", save=True)
+                #  test_results = self.evaluate_epoch(epoch, self.test_loader, "test", save=True)
                  
                  # Combine results
                  # Mark split in results to distinguish?

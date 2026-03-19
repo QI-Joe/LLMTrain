@@ -120,7 +120,8 @@ class GenerationDataset(Dataset):
         # apply_chat_template already injects <|begin_of_text|>, role headers, and EOS
         # so we MUST use add_special_tokens=False when calling the tokenizer directly.
         full_text = self.tokenizer.apply_chat_template(
-            input_data, tokenize=False, add_generation_prompt=False
+            input_data, tokenize=False, add_generation_prompt=False,
+            enable_thinking=False  # Disable Qwen3 thinking mode; ignored by Llama
         )
 
         encoding = self.tokenizer(
@@ -147,7 +148,8 @@ class GenerationDataset(Dataset):
             #    add_generation_prompt=True appends the assistant role header token(s),
             #    so prefix_len points to the first token of the assistant's *content*.
             prefix_text = self.tokenizer.apply_chat_template(
-                input_data[:i], tokenize=False, add_generation_prompt=True
+                input_data[:i], tokenize=False, add_generation_prompt=True,
+                enable_thinking=False  # Disable Qwen3 thinking mode; ignored by Llama
             )
             prefix_len = len(self.tokenizer(
                 prefix_text, add_special_tokens=False, return_tensors=None
@@ -155,7 +157,8 @@ class GenerationDataset(Dataset):
 
             # -- End boundary: full text up to and including this assistant turn.
             full_up_to = self.tokenizer.apply_chat_template(
-                input_data[: i + 1], tokenize=False, add_generation_prompt=False
+                input_data[: i + 1], tokenize=False, add_generation_prompt=False,
+                enable_thinking=False  # Disable Qwen3 thinking mode; ignored by Llama
             )
             end_len = len(self.tokenizer(
                 full_up_to, add_special_tokens=False, return_tensors=None
@@ -313,15 +316,6 @@ def gen_loader_warp(data, tokenizer, config: GenTrainingConfig):
     raw_ds = (train_ds, val_ds, test_ds)
 
     train_loader, val_loader, test_loader = None, None, None
-
-    # 5. Loaders — use gen_collate_fn to handle padding and mixed tensor/string fields
-    # pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    # from functools import partial
-    # collate = partial(gen_collate_fn, pad_token_id=pad_id)
-    
-    # train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers, collate_fn=collate)
-    # val_loader   = DataLoader(val_ds,   batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers, collate_fn=collate)
-    # test_loader  = DataLoader(test_ds,  batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers, collate_fn=collate)
     
     return train_loader, val_loader, test_loader, raw_ds
 

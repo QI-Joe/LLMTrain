@@ -2,16 +2,17 @@ import torch
 from torch import nn
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
 import os
-from typing import Tuple
+from typing import Tuple, Any
 from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
 
 class GenModelLoader(nn.Module):
-    def __init__(self, model_path: str, device, download_str: str = r'~/Documents/LLModel'):
+    def __init__(self, model_path: str, device, accerlator, download_str: str = r'~/Documents/LLModel'):
         super().__init__()
         self.model_path = model_path
         self.dl_path = os.path.expanduser(download_str)
         self.device = device
         self.is_local = False
+        self.accerlator: Any = accerlator
         
         # Enforce quantization (User Requirement: quant setting has to be activated)
         self.quant = True 
