@@ -14,7 +14,7 @@ CLS_idx = 6
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--data_dir", type=str, default="data/ED")
+parser.add_argument("--data_dir", type=str, default="../data/ED")
 parser.add_argument("--emo_input", type=str, default="self_att")  # cross_att; self_att
 parser.add_argument("--emo_combine", type=str, default="gate")  # att; gate
 parser.add_argument("--decoder", type=str, default="single")  # single
