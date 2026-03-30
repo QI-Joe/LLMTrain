@@ -2,6 +2,8 @@
 
 import os
 import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import json
 # from Example_Output_Txt_Function import Logging_and_Data_Initialization
 
 import math
@@ -16,6 +18,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.utils.data import Dataset, DataLoader
 from transformers import TrainingArguments, Trainer, DataCollatorForSeq2Seq
 from peft import LoraConfig, get_peft_model, TaskType
+from ZGeneration.train_gen_fast_LM import calculate_per_sample_ppl
+import nltk
+from nltk.translate.bleu_score import sentence_bleu
 
 
 # ─── Dataset ──────────────────────────────────────────────────────────────────
@@ -95,7 +100,7 @@ class EmpathyDataset(Dataset):
 
 # ─── 训练函数 ─────────────────────────────────────────────────────────────────
 def run_training(train_context: np.ndarray, train_target: np.ndarray, SYSTEM_PROMPT: str, SEED: int) -> None:
-
+    global lr
     print("Building training dataset ...")
     train_dataset = EmpathyDataset(
         train_context, train_target, tokenizer, SYSTEM_PROMPT, max_length=512
@@ -103,12 +108,12 @@ def run_training(train_context: np.ndarray, train_target: np.ndarray, SYSTEM_PRO
     print(f"Training samples: {len(train_dataset)}\n")
 
     training_args = TrainingArguments(
-        output_dir="./Qwen3-8B/qwen3_lora_empathy2",
+        output_dir="./llama3-8B/llama3_lora_empathy2",
         seed=SEED,
         num_train_epochs=7,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=8,       # effective batch size = 16
-        learning_rate=2e-4,
+        learning_rate=lr,
         lr_scheduler_type="cosine",
         warmup_ratio=0.05,
         fp16=True,
@@ -157,7 +162,7 @@ def multi_turn_chat_with_ppl(
     max_new_tokens: int = 256,
     temperature: float = 0.7,
     top_p: float = 0.9,
-) -> tuple[str, float, float]:
+) -> tuple[str, float, float, float]:
 
     model.eval()
 
@@ -204,7 +209,16 @@ def multi_turn_chat_with_ppl(
     loss = nn.CrossEntropyLoss(reduction="mean")(shift_logits, shift_labels)
     ppl  = torch.exp(loss).item()
 
-    return generated_response, loss, ppl
+    # ── Step 3: 根据 calculate_per_sample_ppl 计算 method 2 (sample_ppl) ───
+    # 构建与训练对其的 labels（context 部分遮蔽为 -100）
+    full_labels = full_ids.clone()
+    full_labels[0, :context_len] = -100
+
+    # calculate_per_sample_ppl 期待输入的 logits 和 labels 的形状均为 [Batch, Seq...] 
+    sample_ppl_list = calculate_per_sample_ppl(logits, full_labels)
+    sample_ppl = sample_ppl_list[0]
+
+    return generated_response, loss.item(), ppl, sample_ppl
 
 
 # ─── BLEU 计算（纯 Python，无需 nltk）────────────────────────────────────────
@@ -258,12 +272,38 @@ def compute_sentence_bleu(hypothesis_str: str, reference_str: str) -> tuple[floa
 
     return bleu1, bleu2, bleu3, bleu4
 
-
+def compute_bleu(pred_t, ref_t):
+    if not pred_t:
+        pred_toks = []
+    else:
+        pred_toks = nltk.word_tokenize(pred_t)
+        
+    if not ref_t:
+        ref_toks = []
+    else:
+        ref_toks = nltk.word_tokenize(ref_t)
+    
+    # Safety check for empty references or hypotheses
+    if len(ref_toks) == 0 or len(pred_toks) == 0:
+        b1, b2 = 0.0, 0.0
+    else:
+        # Use method 7 (Geometric Mean) often better for single reference short text
+        # method 1 (epsilon) can be harsh if 1-gram precision is low.
+        # But also check simple exact match ratio or unigram overlap without penalty to debug.
+        
+        # Trying Method 7 as it interpolates methods 4 and 5 (length smoothing + average counts)
+        b1 = sentence_bleu([ref_toks], pred_toks, weights=(1, 0, 0, 0), )
+        b2 = sentence_bleu([ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0), )
+    
+    return b1, b2
+    
+    
 
 if __name__ == "__main__":
 
 
     fname = './qwen11.txt'
+    lr, ratio = 2e-5, 0.1
     # original_stdout, original_stderr, logger, stderr_logger = Logging_and_Data_Initialization(fname)
 
 
@@ -285,10 +325,10 @@ if __name__ == "__main__":
 
 
     # ── 加载数据 ──────────────────────────────────────────────────────────────
-    train_context = np.load(os.path.join('data', 'sys_dialog_texts.train.npy'),  allow_pickle=True)
-    train_target  = np.load(os.path.join('data', 'sys_target_texts.train.npy'),  allow_pickle=True)
-    test_context  = np.load(os.path.join('data', 'sys_dialog_texts.test.npy'),   allow_pickle=True)
-    test_target   = np.load(os.path.join('data', 'sys_target_texts.test.npy'),   allow_pickle=True)
+    train_context = np.load(os.path.join('data/ED', 'sys_dialog_texts.train.npy'),  allow_pickle=True)
+    train_target  = np.load(os.path.join('data/ED', 'sys_target_texts.train.npy'),  allow_pickle=True)
+    test_context  = np.load(os.path.join('data/ED', 'sys_dialog_texts.test.npy'),   allow_pickle=True)
+    test_target   = np.load(os.path.join('data/ED', 'sys_target_texts.test.npy'),   allow_pickle=True)
 
     assert len(train_context) == len(train_target), "train split length mismatch"
     assert len(test_context)  == len(test_target),  "test split length mismatch"
@@ -296,7 +336,7 @@ if __name__ == "__main__":
 
 
     # ── 获取 10% 的 训练数据 用于 微调 ──────────────────────────────────────────────
-    indices = np.random.choice(len(train_context), size=int(len(train_context) * 0.1), replace=False)
+    indices = np.random.choice(len(train_context), size=int(len(train_context) * 0.2), replace=False)
     train_context = train_context[indices]
     train_target  = train_target[indices]
 
@@ -306,8 +346,8 @@ if __name__ == "__main__":
     print(f"Loading model ...")
 
     tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path="Qwen/Qwen3-8B",
-        cache_dir='./Qwen3-8B/',
+        pretrained_model_name_or_path="../../LLModel/llama3.1-8B-Instruct",
+        cache_dir='./llama3-8B/',
         force_download=False,
     )
 
@@ -317,10 +357,10 @@ if __name__ == "__main__":
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path="Qwen/Qwen3-8B",
+        pretrained_model_name_or_path="../../LLModel/llama3.1-8B-Instruct",
         torch_dtype=torch.float16,   # 显存不足可换 torch.bfloat16
         device_map="auto",           # 自动分配到 GPU / CPU
-        cache_dir='./Qwen3-8B/',
+        cache_dir='./llama3-8B/',
         force_download=False,
     )
 
@@ -349,7 +389,7 @@ if __name__ == "__main__":
 
 
     # ── 微调（adapter 已存在则跳过，方便重复实验）────────────────────────────
-    LORA_ADAPTER_PATH = "./Qwen3-8B/qwen3_lora_empathy2/final_adapter"
+    LORA_ADAPTER_PATH = f"./llama3-8B/llama3_lora_empathy_{lr}/final_adapter"
 
     if not os.path.exists(LORA_ADAPTER_PATH):
         run_training(train_context, train_target, SYSTEM_PROMPT, SEED)
@@ -361,10 +401,15 @@ if __name__ == "__main__":
 
     # ── 推理 & PPL / BLEU 计算 ────────────────────────────────────────────────
     ppl_total   = 0.0
+    sample_ppl_total = 0.0
     bleu1_total = 0.0
     bleu2_total = 0.0
     bleu3_total = 0.0
     bleu4_total = 0.0
+    qshbleu1, qshbleu2 = 0.0, 0.0
+
+    all_results = []
+    all_pred_tokens_corpus = []
 
     for i in range(len(test_context)):
 
@@ -376,7 +421,7 @@ if __name__ == "__main__":
         reference = test_target[i]
 
         # ── PPL 计算 ──────────────────────────────────────────────────────────
-        generated, loss, ppl = multi_turn_chat_with_ppl(
+        generated, loss, ppl, sample_ppl = multi_turn_chat_with_ppl(
             model=model,
             tokenizer=tokenizer,
             DEVICE=DEVICE,
@@ -389,12 +434,41 @@ if __name__ == "__main__":
 
         # ── BLEU 计算 ──────────────────────────────────────────────────────────
         bleu1, bleu2, bleu3, bleu4 = compute_sentence_bleu(generated, reference)
+        qshb1, qshb2 = compute_bleu(generated, reference)
 
         bleu1_total += bleu1
         bleu2_total += bleu2
         bleu3_total += bleu3
         bleu4_total += bleu4
+        qshbleu1 += qshb1
+        qshbleu2 += qshb2
         ppl_total += ppl
+        sample_ppl_total += sample_ppl
+
+        pred_tokens = generated.strip().split()
+        all_pred_tokens_corpus.extend(pred_tokens)
+
+        # 记录单条评估结果
+        instance_dist_1 = len(set(pred_tokens)) / len(pred_tokens) if len(pred_tokens) > 0 else 0
+        instance_bigrams = list(zip(pred_tokens, pred_tokens[1:]))
+        instance_dist_2 = len(set(instance_bigrams)) / len(instance_bigrams) if len(instance_bigrams) > 0 else 0
+
+        all_results.append({
+            "id": i,
+            "history": history,
+            "reference": reference,
+            "generated": generated,
+            "metrics": {
+                "ppl": ppl,
+                "sample_ppl": sample_ppl,
+                "bleu1": bleu1,
+                "bleu2": bleu2,
+                "bleu3": bleu3,
+                "bleu4": bleu4,
+                "my_bleu1": qshb1,
+                "my_bleu2": qshb2,
+            }
+        })
 
         print(f"【第 {i + 1} 条数据】")
         print("对话历史：")
@@ -405,15 +479,39 @@ if __name__ == "__main__":
         print(f"【模型生成回复】\n{generated}")
         print(f"【损失】{loss:.4f}")
         print(f"【标准回复 PPL】{ppl:.4f}")
+        print(f"【Per Sample PPL (Method 2)】{sample_ppl:.4f}")
         print(f"【BLEU-1】{bleu1:.4f}")
         print(f"【BLEU-2】{bleu2:.4f}")
         print(f"【BLEU-3】{bleu3:.4f}")
         print(f"【BLEU-4】{bleu4:.4f}")
+        print(f"【My BLEU-1】{qshb1:.4f}")
+        print(f"【My BLEU-2】{qshb2:.4f}")
         print()
 
+    # ── 计算全部生成在 Corpus 级别的 Dist-1 / Dist-2 ─────────────────────────
+    if len(all_pred_tokens_corpus) > 0:
+        corpus_dist_1 = len(set(all_pred_tokens_corpus)) / len(all_pred_tokens_corpus)
+        bigrams = list(zip(all_pred_tokens_corpus, all_pred_tokens_corpus[1:]))
+        corpus_dist_2 = len(set(bigrams)) / len(bigrams) if len(bigrams) > 0 else 0
+    else:
+        corpus_dist_1, corpus_dist_2 = 0.0, 0.0
 
     print(f"Average PPL: {ppl_total / len(test_context):.4f}")
+    print(f"Average Sample PPL: {sample_ppl_total / len(test_context):.4f}")
     print(f"Average BLEU-1: {bleu1_total / len(test_context):.4f}")
     print(f"Average BLEU-2: {bleu2_total / len(test_context):.4f}")
-    print(f"Average BLEU-3: {bleu3_total / len(test_context):.4f}")
-    print(f"Average BLEU-4: {bleu4_total / len(test_context):.4f}")
+    print(f"Average My BLEU-1: {qshbleu1 / len(test_context):.4f}")
+    print(f"Average My BLEU-2: {qshbleu2 / len(test_context):.4f}")
+    print(f"Corpus Dist-1: {corpus_dist_1:.4f}")
+    print(f"Corpus Dist-2: {corpus_dist_2:.4f}")
+
+    # 保存 JSONL 结果并包含全部级别的 dist1/2 指标
+    for item in all_results:
+        item["metrics"]["dist1_corpus"] = corpus_dist_1
+        item["metrics"]["dist2_corpus"] = corpus_dist_2
+    
+    output_jsonl_path = "eval_results.jsonl"
+    with open(output_jsonl_path, "w", encoding="utf-8") as f:
+        for item in all_results:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    print(f"Evaluation results saved to {output_jsonl_path}")

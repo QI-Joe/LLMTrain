@@ -46,6 +46,7 @@ class TrainingConfig:
     # ========== Fast Training Mode ==========
     fast_train: bool = True  # 快速训练模式（使用20%的val/test数据）
     quant: bool = False
+    accerlator: bool = False
     
     # ========== Logging & Checkpointing ==========
     log_interval: int = 100  # 每100步记录一次loss
@@ -83,6 +84,8 @@ class TrainingConfig:
         the_method = 'full_train'
         if self.few_shot: the_method="FSL"
         elif self.semi_supervised: the_method = "SSP"
+        
+        if self.accerlator: self.cuda_device='cpu'
         
         self.experiment_name = f"{model_simplifed_name[0]+self.task}_{datetime.today().strftime('%m-%d')}"
         self.run_name = f"{self.param1}_{the_method}_{self.param2}_{self.batch_size}_{self.param3}_{self.prompt_key}_{self.topic_name}"

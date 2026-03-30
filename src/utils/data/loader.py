@@ -218,8 +218,8 @@ class Dataset(data.Dataset):
         # tokenizer.add_special_tokens({"additional_special_tokens": ["[CLS]"]})
         # model.resize_token_embeddings(len(tokenizer))
         if self.add_CLS:
-            if "[CLS]" in tokenizer.get_vocab():
-                self.cls_id = tokenizer.convert_tokens_to_ids("[CLS]")
+            if "[CLS]" in self.tokenizer.get_vocab():
+                self.cls_id = self.tokenizer.convert_tokens_to_ids("[CLS]")
             else:
                 raise ValueError("add_CLS=True but [CLS] token not found in tokenizer. "
                                  "Add it via tokenizer.add_special_tokens() first.")
@@ -331,6 +331,7 @@ class Dataset(data.Dataset):
         if self.add_CLS:
             full_text_ids = [self.cls_id] + full_text_ids
             labels = [-100] + labels  # CLS token 本身不需要计算 loss，所以用 -100
+            input_ids = [self.cls_id] + input_ids
         
         return torch.LongTensor(full_text_ids), torch.LongTensor(labels), torch.LongTensor(input_ids)
 
@@ -510,6 +511,7 @@ def collate_fn(data, pad_token_id=0):
     
     ## Situation
     situation_batch, situation_lengths = merge(item_info["situation"], pad_token_id)
+    situation_mask = situation_batch!=pad_token_id
 
     input_batch = input_batch.to(config.device)
     attention_mask = attention_mask.to(config.device)
@@ -518,6 +520,7 @@ def collate_fn(data, pad_token_id=0):
     prompt_batch = prompt_batch.to(config.device)
     prompt_mask = prompt_mask.to(config.device)
     labels = labels.to(config.device)    
+    situation_mask = situation_mask.to(config.device)
     
     d = {}
     d["input_batch"] = input_batch
@@ -532,6 +535,7 @@ def collate_fn(data, pad_token_id=0):
 
     d["situation_batch"] = situation_batch
     d["situation_lengths"] = torch.LongTensor(situation_lengths).to(config.device)
+    d["situation_attn_mask"] = situation_mask
 
     ## program (emotion)
     d["target_program"] = item_info["emotion"]

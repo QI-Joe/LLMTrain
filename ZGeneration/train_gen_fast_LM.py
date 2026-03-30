@@ -8,19 +8,19 @@ import nltk
 from tqdm import tqdm
 from accelerate import Accelerator
 from torch.optim import AdamW
+from torch.utils.data import DataLoader
+import torch.nn.utils.rnn as rnn_utils
 from transformers import get_linear_schedule_with_warmup
 from torch.utils.tensorboard import SummaryWriter
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from torch import nn
+from nltk.translate.bleu_score import sentence_bleu
 
 # Add parent directory to path to access modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from ZGeneration.config_gen import GenTrainingConfig
-from src.utils.data.loader import prepare_data_seq
+from ZGeneration.quick_dataloader import get_dataloader
 from ZGeneration.model_loader_gen import GenModelLoader
 from utils_llama3 import setup_logger, set_seed
-from typing import Tuple
 
 # Ensure NLTK data (lite check)
 try:
@@ -29,8 +29,6 @@ try:
 except LookupError:
     nltk.download('punkt')
     nltk.download('punkt_tab')
-
-PAD_TOKEN = None
 
 def calculate_accuracy(logits, labels):
     # Logits: [Batch, Seq, Vocab], Labels: [Batch, Seq]
@@ -64,56 +62,77 @@ def calculate_per_sample_ppl(logits, labels):
     # Restore valid ppl only where count > 0
     return per_sample_ppl.tolist()
 
-class EmotionHead(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.attention_layer2 = nn.Linear(config.hidden_size, config.hidden_size)
-        self.attention_v2 = nn.Linear(config.hidden_size, 1, bias=False)
-        self.hidden_layer2 = nn.Linear(config.hidden_size, config.hidden_size)
-        self.output_layer2 = nn.Linear(config.hidden_size, config.num_emotions)
-    
-    def forward(self, enc_outputs, attention_mask=None):
-        # Attention emotion
-        projected = self.attention_layer2(enc_outputs)
-        projected = nn.Tanh()(projected)
-        attn_logits = self.attention_v2(projected).squeeze(2) # (B, L)
-        
-        if attention_mask is not None:
-             # Mask invalid positions with large negative number
-             # Assuming mask is 1 for valid, 0 for pad.
-             # Convert to float mask where 0 -> -inf
-             # attention_mask usually (B, L)
-             mask_val = (1.0 - attention_mask.float()) * -10000.0
-             attn_logits = attn_logits + mask_val
+class DataCollator:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.pad_token_id = self.tokenizer.pad_token_id
 
-        scores = nn.Softmax(dim=-1)(attn_logits)
-        scores = scores.unsqueeze(1)  # (batch_size, 1, seq_len)
-        hidden_x = torch.bmm(scores, enc_outputs).squeeze(1)
-        x = self.hidden_layer2(hidden_x)
-        x = nn.Tanh()(x)
-        emo_logits = self.output_layer2(x)
-        return emo_logits
+    def __call__(self, batch):
+        # batch is list of dicts from Dataset
+        input_ids = [item['input_ids'] for item in batch]
+        labels = [item['labels'] for item in batch]
+        prompt_ids = [item['prompt_ids'] for item in batch]
+        target_texts = [item['target_text'] for item in batch]
+        
+        # Pad input_ids (right)
+        input_ids_padded = rnn_utils.pad_sequence(input_ids, batch_first=True, padding_value=self.pad_token_id)
+        
+        # Attention Mask (1 for real tokens, 0 for padding)
+        attention_mask = (input_ids_padded != self.pad_token_id).long()
+        
+        # Pad labels (right) with -100
+        labels_padded = rnn_utils.pad_sequence(labels, batch_first=True, padding_value=-100)
+        
+        # Pad prompt_ids (left) for generation
+        # pad_sequence pads to the right. To pad left, reverse, pad, reverse.
+        prompt_ids_reversed = [t.flip(0) for t in prompt_ids]
+        prompt_ids_padded_reversed = rnn_utils.pad_sequence(prompt_ids_reversed, batch_first=True, padding_value=self.pad_token_id)
+        prompt_ids_padded = prompt_ids_padded_reversed.flip(1)
+        prompt_mask = (prompt_ids_padded != self.pad_token_id).long()
+        
+        # Handle optional keys safely
+        ud_idxs = [item.get('ud_idx', -1) for item in batch]
+        ld_idxs = [item.get('ld_idx', -1) for item in batch]
+        
+        # Convert to tensor if list is numbers
+        if ud_idxs and isinstance(ud_idxs[0], int):
+            ud_idxs = torch.tensor(ud_idxs)
+        if ld_idxs and isinstance(ld_idxs[0], int):
+            ld_idxs = torch.tensor(ld_idxs)
+
+        return {
+            "input_ids": input_ids_padded,
+            "labels": labels_padded,
+            "attention_mask": attention_mask,
+            "prompt_ids": prompt_ids_padded,
+            "prompt_mask": prompt_mask,
+            "target_text": target_texts,
+            "ud_idx": ud_idxs,
+            "ld_idx": ld_idxs
+        }
 
 class GenerationTrainer:
     def __init__(self, config: GenTrainingConfig):
         # 0. GPU Isolation (Must be before Accelerator)
         if config.cuda_device is not None:
-            # Fix: Use torch.cuda.set_device instead of CUDA_VISIBLE_DEVICES
-            torch.cuda.set_device(config.cuda_device)
-            self.internal_device_str = f"cuda:{config.cuda_device}"
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(config.cuda_device)
+            # Map internal usage to cuda:0 since it is the only visible one
+            # CRITICAL FIX: When CUDA_VISIBLE_DEVICES is set to a single ID, that GPU becomes 'cuda:0'
+            
+            # self.internal_device_str = f"cuda:{config.cuda_device}"
+            self.internal_device_str = "cuda:0"
         else:
             self.internal_device_str = config.device
 
         # 1. Init Accelerator
         self.accelerator = Accelerator(
-            mixed_precision='bf16',
+            mixed_precision='fp16' if config.fp16 else 'no',
             gradient_accumulation_steps=config.gradient_accumulation_steps
         )
         self.device = self.accelerator.device
         self.config = config
-        
-        # Initialize custom head
-        self.emo_head = EmotionHead(config).to(self.internal_device_str)
         
         # Logging setup
         self.logger = setup_logger(config)
@@ -137,17 +156,21 @@ class GenerationTrainer:
         # Note: GenModelLoader enforces quant=True
         loader = GenModelLoader(self.config.model_name, self.internal_device_str, self.accelerator)
         self.model, self.tokenizer = loader.start()
-        global PAD_TOKEN
-        PAD_TOKEN = self.tokenizer.pad_token_id
+        
+        # Ensure pad token exists
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
         # 3. Load Data
         self.logger.info("Loading Data...")
-        self.train_loader, self.val_loader, self.test_loader, vocab, emo_dict, _ = prepare_data_seq(self.tokenizer, self.config)
+        self.train_dataset, self.test_dataset = get_dataloader(self.tokenizer)
+        
+        collator = DataCollator(self.tokenizer)
+        self.train_loader = DataLoader(self.train_dataset, batch_size=self.config.batch_size, shuffle=True, collate_fn=collator, num_workers=self.config.num_workers)
+        self.test_loader = DataLoader(self.test_dataset, batch_size=self.config.batch_size, shuffle=False, collate_fn=collator, num_workers=self.config.num_workers)
         
         # 4. Optimizer
-        self.logger.info("Setting up Optimizer with Custom Head parameters...")
-        # Include custom head parameters in optimizer
-        params = list(self.model.parameters()) + list(self.emo_head.parameters())
-        self.optimizer = AdamW(params, lr=self.config.learning_rate)
+        self.optimizer = AdamW(self.model.parameters(), lr=self.config.learning_rate)
         
         # 5. Scheduler
         total_steps = len(self.train_loader) * self.config.num_epochs // self.config.gradient_accumulation_steps
@@ -156,17 +179,14 @@ class GenerationTrainer:
         )
         
         # 6. Prepare with Accelerator
-        if hasattr(self.config, 'accerlator') and self.config.accerlator:
-            self.model, self.emo_head, self.optimizer, self.train_loader, self.val_loader, self.test_loader, self.scheduler = self.accelerator.prepare(
-                self.model, self.emo_head, self.optimizer, self.train_loader, self.val_loader, self.test_loader, self.scheduler
-            )
-    
-    
+        self.model, self.optimizer, self.train_loader, self.test_loader, self.scheduler = self.accelerator.prepare(
+            self.model, self.optimizer, self.train_loader, self.test_loader, self.scheduler
+        )
+        
     def train(self):
         self.logger.info("Starting Training...")
         global_step = 0
         total_batches = len(self.train_loader)
-        val_trigger_step = int(total_batches * 0.8) # Intermediate validation logic
 
         for epoch in range(self.config.num_epochs):
             self.model.train()
@@ -177,41 +197,17 @@ class GenerationTrainer:
             for step, batch in pbar:
                 with self.accelerator.accumulate(self.model):
                     # Forward
-                    def quick_forward(input_ids: torch.Tensor, labels, attention_mask):
-                        output = self.model.forward(
-                            input_ids=input_ids, 
-                            attention_mask=attention_mask, 
-                            labels=labels,
-                            output_hidden_states = True,
-                        )
-                        loss = output.loss
+                    outputs = self.model(
+                        input_ids=batch['input_ids'], 
+                        attention_mask=batch['attention_mask'],
+                        labels=batch['labels']
+                    )
+                    loss = outputs.loss
                     
-                        hidden_states: Tuple = output.hidden_states
-                        last_hidden_states = hidden_states[-1]
-                        return loss, last_hidden_states
-                    
-                    ctx_loss, ctx_last_hidden_dim = quick_forward(batch['input_batch'], batch['labels'], batch['attention_mask'])
-                    sit_loss, sit_last_hidden_dim = quick_forward(batch['situation_batch'], None, batch['situation_attn_mask'])
-                    
-                    sit_emo_logit = self.emo_head(sit_last_hidden_dim, batch['situation_attn_mask'])
-                    emo_label = torch.LongTensor(batch['program_label']).to(sit_emo_logit.device)
-                    sit_emo_loss = nn.CrossEntropyLoss()(sit_emo_logit, emo_label)
-                    
-                    loss = ctx_loss + sit_emo_loss
-                    
-                    if torch.isnan(loss):
-                        print(f"\n[Rank {self.accelerator.process_index}] Loss is NaN at step {step} epoch {epoch}")
-                        print(f"ctx_loss: {ctx_loss}, sit_emo_loss: {sit_emo_loss}")
-                        print(f"Input batch shape: {batch['input_batch'].shape}")
-                        print(f"Target batch shape: {batch['target_batch'].shape}")
-                        print(f"Sit batch shape: {batch['situation_batch'].shape}")
-                        # self.accelerator.wait_for_everyone()
-                        # raise ValueError("Loss is NaN")
-
                     self.accelerator.backward(loss)
                     
                     if self.accelerator.sync_gradients:
-                        self.accelerator.clip_grad_norm_(self.optimizer.param_groups[0]['params'], self.config.max_grad_norm)
+                        self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
                     
                     self.optimizer.step()
                     self.scheduler.step()
@@ -241,11 +237,45 @@ class GenerationTrainer:
                 pass
                 # self.evaluate_epoch(epoch, self.val_loader, "val", save=False)
             else:
+                 # During final epoch, run both val and test and save together
                  self.logger.info("Final Epoch detected. Running Combined Validation & Test Evaluation...")
-                 val_results = self.evaluate_epoch(epoch, self.val_loader, "val", save=True)
+                #  val_results = self.evaluate_epoch(epoch, self.val_loader, "val", save=True)
                  test_results = self.evaluate_epoch(epoch, self.test_loader, "test", save=True)
                  
+                 # Combine results
+                 # Mark split in results to distinguish?
+                #  for res in val_results: res['split'] = 'val'
+                #  for res in test_results: res['split'] = 'test'
+                 
+                #  combined_results = val_results + test_results
+                #  self.save_eval_results(combined_results, epoch, "final_combined")
+                 
             self.save_checkpoint(epoch)
+
+    def save_checkpoint(self, epoch):
+        self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process:
+            ckpt_path = os.path.join(self.config.checkpoint_dir, f"checkpoint-epoch-{epoch}")
+            unwrapped = self.accelerator.unwrap_model(self.model)
+            unwrapped.save_pretrained(ckpt_path)
+            self.tokenizer.save_pretrained(ckpt_path)
+    
+    def save_eval_results(self, results, epoch, prefix):
+        # Save to outputs dir
+        # Filename: eval_results_epoch_{epoch}_rank_{rank}.jsonl
+        filename = f"eval_results_epoch_{prefix}_{epoch}_rank_{self.accelerator.process_index}.jsonl"
+        out_path = os.path.join(self.config.tensorboard_dir, filename) # Reuse param_update_check dir or just TB dir?
+        # Config output_dir usually better
+        save_dir = os.path.join(self.config.output_dir, self.config.experiment_name, self.config.run_name, "eval_logs")
+        os.makedirs(save_dir, exist_ok=True)
+        final_path = os.path.join(save_dir, filename)
+        
+        
+        with open(final_path, 'w') as f:
+            for item in results:
+                f.write(json.dumps(item) + "\n")
+                
+        self.logger.info(f"Saved {len(results)} eval results to {final_path}")
 
     def evaluate_epoch(self, epoch, dataloader, prefix="val", save=True):
         self.model.eval()
@@ -265,31 +295,15 @@ class GenerationTrainer:
             
             with torch.no_grad():
                 # Teacher forcing metrics
-                def quick_forward(input_ids: torch.Tensor, labels, attention_mask):
-                    output = self.model(
-                        input_ids=input_ids, 
-                        attention_mask=attention_mask, 
-                        labels=labels,
-                        output_hidden_states = True,
-                    )
-                    loss = output.loss
+                outputs = self.model(
+                    input_ids=batch['input_ids'], 
+                    attention_mask=batch['attention_mask'],
+                    labels=batch['labels']
+                )
                 
-                    hidden_states: Tuple = output.hidden_states
-                    last_hidden_states = hidden_states[-1]
-                    return output.logits, loss, last_hidden_states
-                    
-                ctx_logit, ctx_loss, ctx_last_hidden_dim = quick_forward(batch['input_batch'], batch['labels'], batch['attention_mask'])
-                sit_logit, sit_loss, sit_last_hidden_dim = quick_forward(batch['situation_batch'], None, batch['situation_attn_mask'])
-                
-                sit_emo_logit = self.emo_head(sit_last_hidden_dim, batch['situation_attn_mask'])
-                emo_label = torch.LongTensor(batch['program_label']).to(sit_emo_logit.device)
-                sit_emo_loss = nn.CrossEntropyLoss()(sit_emo_logit, emo_label)
-                
-                loss = ctx_loss + sit_emo_loss
-                
-                loss_val = loss.item()
-                acc_val = calculate_accuracy(ctx_logit, batch['labels'])
-                ppl_samples = calculate_per_sample_ppl(ctx_logit, batch['labels'])
+                loss_val = outputs.loss.item()
+                acc_val = calculate_accuracy(outputs.logits, batch['labels'])
+                ppl_samples = calculate_per_sample_ppl(outputs.logits, batch['labels'])
                 
                 batch_loss_mean.append(loss_val)
                 batch_acc_mean.append(acc_val)
@@ -300,7 +314,7 @@ class GenerationTrainer:
                 gen_ids = unwrapped_model.generate(
                     batch['prompt_ids'],
                     attention_mask=batch['prompt_mask'],
-                    max_new_tokens=50,
+                    max_new_tokens=getattr(self.config, 'max_new_tokens', 100),
                     pad_token_id=self.tokenizer.pad_token_id,
                     do_sample=True,
                     top_p=getattr(self.config, 'gen_top_p', 0.9),
@@ -314,13 +328,12 @@ class GenerationTrainer:
                 decoded_preds = self.tokenizer.batch_decode(generated_part, skip_special_tokens=True)
                 decoded_targets = batch['target_text'] # List of strings
                 
-                # Process metrics per sample
-                # chencherry = SmoothingFunction()
-                
+                # Process metrics per sample                
                 for i in range(len(decoded_preds)):
                     pred_t = decoded_preds[i].strip()
                     ref_t = decoded_targets[i].strip()
-
+                    
+                    # Basic whitespace tokenization first to avoid NLTKpunkt issues with empty strings
                     if not pred_t:
                         pred_toks = []
                     else:
@@ -338,6 +351,11 @@ class GenerationTrainer:
                     if len(ref_toks) == 0:
                         b1, b2 = 0.0, 0.0
                     else:
+                        # Use method 7 (Geometric Mean) often better for single reference short text
+                        # method 1 (epsilon) can be harsh if 1-gram precision is low.
+                        # But also check simple exact match ratio or unigram overlap without penalty to debug.
+                        
+                        # Trying Method 7 as it interpolates methods 4 and 5 (length smoothing + average counts)
                         b1 = sentence_bleu([ref_toks], pred_toks, weights=(1, 0, 0, 0), )
                         b2 = sentence_bleu([ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0),)
                     
@@ -391,37 +409,12 @@ class GenerationTrainer:
             
         return all_results
 
-    def save_eval_results(self, results, epoch, prefix):
-        # Save to outputs dir
-        # Filename: eval_results_epoch_{epoch}_rank_{rank}.jsonl
-        filename = f"eval_results_epoch_{prefix}_{epoch}_rank_{self.accelerator.process_index}.jsonl"
-        out_path = os.path.join(self.config.tensorboard_dir, filename) # Reuse param_update_check dir or just TB dir?
-        # Config output_dir usually better
-        save_dir = os.path.join(self.config.output_dir, self.config.experiment_name, self.config.run_name, "eval_logs")
-        os.makedirs(save_dir, exist_ok=True)
-        final_path = os.path.join(save_dir, filename)
-        
-        
-        with open(final_path, 'w') as f:
-            for item in results:
-                f.write(json.dumps(item) + "\n")
-                
-        self.logger.info(f"Saved {len(results)} eval results to {final_path}")
-
-    def save_checkpoint(self, epoch):
-        self.accelerator.wait_for_everyone()
-        if self.accelerator.is_main_process:
-            ckpt_path = os.path.join(self.config.checkpoint_dir, f"checkpoint-epoch-{epoch}")
-            unwrapped = self.accelerator.unwrap_model(self.model)
-            unwrapped.save_pretrained(ckpt_path)
-            self.tokenizer.save_pretrained(ckpt_path)
-
 def main():
     parser = argparse.ArgumentParser(description="Generation Task Training")
     
     # --- 1. Model & Hardware ---
-    parser.add_argument("--model_name", type=str, default="llama3.1-8B-Instruct", help="Model path")
-    parser.add_argument("--cuda_device", type=int, default=0, help="GPU ID to use")
+    parser.add_argument("--model_name", type=str, default="Llama-3.3-8B-Instruct", help="Model path")
+    parser.add_argument("--cuda_device", type=int, default=2, help="GPU ID to use")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     
     # --- 2. Data & Paths ---
@@ -440,7 +433,6 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay")
     parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Max gradient norm")
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
-    parser.add_argument("--accerlator", action='store_true', default=False, help="Accerlating the data,")
     
     # --- 4. Training Modes (Fast/Few-shot/Semi) ---
     parser.add_argument("--fast_train", action="store_true", help="Debug mode with small data")
@@ -460,10 +452,9 @@ def main():
     # Init Config
     config = GenTrainingConfig()
     
-    args.accerlator = False
     # Override config with args
     for key, value in vars(args).items():
-        if hasattr(config, key):
+        if hasattr(config, key) and value is not None:
             setattr(config, key, value)
             
     # Note: quant is handled inside GenModelLoader (enforced to True)
