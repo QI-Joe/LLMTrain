@@ -29,7 +29,7 @@ from torch.utils.tensorboard import SummaryWriter
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 # from peft import PeftModel
 from datetime import datetime
-
+from typing import List, Dict, Any
 # Add parent directory to path to access modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -139,6 +139,21 @@ def calc_distinct(candidates, print_score: bool = True):
         scores.append(score)
 
     return scores
+
+def geeneral_distinct(candidates: List, len_tokenizer: int):
+    candidates = [word_tokenize(candidate) for candidate in candidates]
+    finsl_scores = list()
+    fucked_dict = dict()
+    
+    for n in range(2):
+        for stnc in candidates:
+            for i in range(len(stnc) - n + 1):
+                ney = tuple(stnc[i : i + n])
+                fucked_dict[ney] = 1
+        finsl_scores.append(len(fucked_dict) / (len_tokenizer + 1e-16))
+    
+    return finsl_scores
+        
 
 class GenerationEval:
     def __init__(self, config: GenTrainingConfig, checkpoint_dir: str = None):

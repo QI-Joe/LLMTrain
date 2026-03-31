@@ -351,11 +351,8 @@ class GenerationTrainer:
                     if len(ref_toks) == 0:
                         b1, b2 = 0.0, 0.0
                     else:
-                        # Use method 7 (Geometric Mean) often better for single reference short text
                         # method 1 (epsilon) can be harsh if 1-gram precision is low.
                         # But also check simple exact match ratio or unigram overlap without penalty to debug.
-                        
-                        # Trying Method 7 as it interpolates methods 4 and 5 (length smoothing + average counts)
                         b1 = sentence_bleu([ref_toks], pred_toks, weights=(1, 0, 0, 0), )
                         b2 = sentence_bleu([ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0),)
                     

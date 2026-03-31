@@ -46,6 +46,7 @@ class GenModelLoader(nn.Module):
         if tokenizer.pad_token is None:
             # tokenizer.pad_token = tokenizer.eos_token
             tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
+        tokenizer.add_special_tokens({'cls_token': '[CLS]'})
             
         tokenizer.padding_side = 'right' # Better for generation usually, but training implies right padding often.
         # tokenizer.padding_side = 'right'
@@ -63,9 +64,12 @@ class GenModelLoader(nn.Module):
         # With BitsAndBytes quantization, device_map="auto" is REQUIRED for proper memory management
         # Using a specific device string like "cuda:0" causes inefficient placement and slow inference
         if "cuda" in str(self.device):
-            device_map_config = "auto"  # CRITICAL: Use "auto" with quantization for proper performance
+            device_map_config = {'': f"cuda:{self.device}"}  # CRITICAL: Use "auto" with quantization for proper performance
         else:
-            device_map_config = "cpu"
+            device_map_config = {'': "cpu"}
+            
+        if not isinstance(self.accerlator, type(None)):
+            device_map_config = {'': self.accerlator.local_process_index}
 
         print(f"Loading Model with Quantization: {self.quant}, device_map: {device_map_config}")
         model = AutoModelForCausalLM.from_pretrained(
@@ -78,8 +82,8 @@ class GenModelLoader(nn.Module):
         
         # CRITICAL: Always resize embeddings if pad token was added (vocab size changed)
         # This must happen BEFORE LoRA to ensure base model embeddings match tokenizer
+        model.resize_token_embeddings(len(tokenizer))
         if tokenizer.pad_token == '<|pad|>':
-            model.resize_token_embeddings(len(tokenizer))
             print(f"Resized model embeddings: {model.get_input_embeddings().weight.shape[0]} to match tokenizer vocab size: {len(tokenizer)}")
         
         # Apply LoRA (only for fine-tuning, not raw model)
@@ -99,7 +103,8 @@ class GenModelLoader(nn.Module):
             target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], # Extended for better Gen
             lora_dropout=0.05,
             bias="none",
-            task_type="CAUSAL_LM" 
+            task_type="CAUSAL_LM",
+            # modules_to_save=["embed_tokens", "lm_head"]
         )
         
         model = get_peft_model(model, lora_config)

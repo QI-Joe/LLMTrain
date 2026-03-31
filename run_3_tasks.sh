@@ -3,6 +3,7 @@
 # Configuration
 LOG_DIR="logs"
 mkdir -p $LOG_DIR
+ts() { date '+%F %T'; }
 TIMESTAMP=$(date '%m-%d_%H-%M')
 
 # Function to start a background process and track its PID
@@ -26,66 +27,62 @@ echo "Starting Multi-Task Training Run at $TIMESTAMP"
 # --- Task 1: Llama 3.3 FSL (32 Shots) ---
 # Assuming Llama 3.3 fits on GPU 0
 
-# start "task1_llama3_SSL" \
-# env CUDA_VISIBLE_DEVICES=0 python3 ZGeneration/train_gen.py \
-#     --model_name "Llama-3.3-8B-Instruct" \
-#     --cuda_device 0 \
-#     --topic_name "Llama3_SSL" \
-#     --experiment_name "Multi_Run_${TIMESTAMP}" \
-#     --batch_size 2 \
-#     --gradient_accumulation_steps 2 \
-#     --num_epochs 5 \
-#     --learning_rate 2e-5 \
-#     --max_seq_length 2048 \
-#     --max_new_tokens 50 \
-#     --val_ratio 0.04 \
-#     --test_ratio 0.04 \
-#     --few_shot \
-#     --shots_per_class 4 \
-    # --semi_supervised \
-    # --semi_ratio 0.01 \
+start "task1_llama3_SSL" \
+env CUDA_VISIBLE_DEVICES=0 python3 ZGeneration/train_gen_fast_LM.py \
+    --model_name "llama3.1-8B-Instruct" \
+    --cuda_device 0 \
+    --topic_name "Qwen4B_SSL02" \
+    --experiment_name "Multi_Run_${TIMESTAMP}" \
+    --batch_size 4 \
+    --gradient_accumulation_steps 2 \
+    --num_epochs 3 \
+    --learning_rate 2e-5 \
+    --max_seq_length 2183 \
+    --max_new_tokens 50 \
+    --semi_ratio 0.13 \
 
 # --- Task 2: Qwen 4B FSL (32 Shots) ---
 # Run on GPU 1 (assuming available)
-start "task2_qwen4b_FSL32" \
-env CUDA_VISIBLE_DEVICES=1 python3 ZGeneration/train_gen.py \
-    --model_name "Qwen3-4B-Instruct-2507" \
-    --cuda_device 1 \
-    --topic_name "Qwen4B_FSL16" \
+start "task2_Llama3_SSL15" \
+env CUDA_VISIBLE_DEVICES=1 python3 ZGeneration/train_gen_fast_LM.py \
+    --model_name "llama3.1-8B-Instruct" \
+    --cuda_device 0 \
+    --topic_name "Llama3_SSL15" \
     --experiment_name "Multi_Run_${TIMESTAMP}" \
-    --batch_size 2 \
+    --batch_size 4 \
+    --gradient_accumulation_steps 2 \
+    --num_epochs 3 \
+    --learning_rate 2e-5 \
+    --max_seq_length 2183 \
+    --max_new_tokens 50 \
+    --semi_ratio 0.15 \
+    # --val_ratio 0.04 \
+    # --test_ratio 0.1 \
+    # --few_shot \
+    # --shots_per_class 16 \
+    # --semi_supervised \
+    # --semi_ratio 0.1 \
+
+# --- Task 3: Qwen 4B Semi-Supervised (SSL) ---
+# Concurrent with Task 2 on GPU 1
+start "task3_Llama31_LM_SSL02" \
+env CUDA_VISIBLE_DEVICES=2 python3 ZGeneration/train_gen_fast_LM.py \
+    --model_name "llama3.1-8B-Instruct" \
+    --cuda_device 0 \
+    --topic_name "Llama3.1_SSL17" \
+    --experiment_name "Multi_Run_${TIMESTAMP}" \
+    --batch_size 4 \
     --gradient_accumulation_steps 2 \
     --num_epochs 3 \
     --learning_rate 2e-5 \
     --max_seq_length 2183 \
     --max_new_tokens 50 \
     --val_ratio 0.04 \
-    --test_ratio 0.04 \
-    --few_shot \
-    --shots_per_class 4 \
-    # --semi_supervised \
-    # --semi_ratio 0.1 \
-
-# --- Task 3: Qwen 4B Semi-Supervised (SSL) ---
-# Concurrent with Task 2 on GPU 1
-start "task3_Llama31_FSL16" \
-env CUDA_VISIBLE_DEVICES=2 python3 ZGeneration/train_gen.py \
-    --model_name "llama3.1-8B-Instruct" \
-    --cuda_device 2 \
-    --topic_name "Llama3.1_FSL16" \
-    --experiment_name "Multi_Run_${TIMESTAMP}" \
-    --val_ratio 0.04 \
-    --test_ratio 0.04 \
-    --batch_size 2 \
-    --gradient_accumulation_steps 2 \
-    --num_epochs 5 \
-    --learning_rate 2e-5 \
-    --max_seq_length 2183 \
-    --max_new_tokens 50 \
-    --few_shot \
-    --shots_per_class 4 \
-    # --semi_supervised \
-    # --semi_ratio 0.1 \
+    --test_ratio 0.1 \
+    --semi_supervised \
+    --semi_ratio 0.17 \
+    # --few_shot \ 
+    # --shots_per_class 16 \
 
 echo "All tasks submitted. Waiting for completion..."
 echo "PIDs: ${pids[*]}"

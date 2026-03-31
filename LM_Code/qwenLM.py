@@ -303,7 +303,8 @@ if __name__ == "__main__":
 
 
     fname = './qwen11.txt'
-    lr, ratio = 2e-5, 0.1
+    lr, ratio = 2e-5, 0.2
+    new_model_train = True
     # original_stdout, original_stderr, logger, stderr_logger = Logging_and_Data_Initialization(fname)
 
 
@@ -336,7 +337,7 @@ if __name__ == "__main__":
 
 
     # ── 获取 10% 的 训练数据 用于 微调 ──────────────────────────────────────────────
-    indices = np.random.choice(len(train_context), size=int(len(train_context) * 0.2), replace=False)
+    indices = np.random.choice(len(train_context), size=int(len(train_context) * ratio), replace=False)
     train_context = train_context[indices]
     train_target  = train_target[indices]
 
@@ -389,9 +390,9 @@ if __name__ == "__main__":
 
 
     # ── 微调（adapter 已存在则跳过，方便重复实验）────────────────────────────
-    LORA_ADAPTER_PATH = f"./llama3-8B/llama3_lora_empathy_{lr}/final_adapter"
+    LORA_ADAPTER_PATH = f"./llama3-8B/llama3_lora_empathy_{lr}_{int(ratio*100)}/final_adapter"
 
-    if not os.path.exists(LORA_ADAPTER_PATH):
+    if not os.path.exists(LORA_ADAPTER_PATH) or new_model_train:
         run_training(train_context, train_target, SYSTEM_PROMPT, SEED)
     else:
         print(f"Found existing LoRA adapter at '{LORA_ADAPTER_PATH}', skipping training.\n")
@@ -470,24 +471,6 @@ if __name__ == "__main__":
             }
         })
 
-        print(f"【第 {i + 1} 条数据】")
-        print("对话历史：")
-        pprint(history)
-        print("标准回复：")
-        print(reference)
-        print()
-        print(f"【模型生成回复】\n{generated}")
-        print(f"【损失】{loss:.4f}")
-        print(f"【标准回复 PPL】{ppl:.4f}")
-        print(f"【Per Sample PPL (Method 2)】{sample_ppl:.4f}")
-        print(f"【BLEU-1】{bleu1:.4f}")
-        print(f"【BLEU-2】{bleu2:.4f}")
-        print(f"【BLEU-3】{bleu3:.4f}")
-        print(f"【BLEU-4】{bleu4:.4f}")
-        print(f"【My BLEU-1】{qshb1:.4f}")
-        print(f"【My BLEU-2】{qshb2:.4f}")
-        print()
-
     # ── 计算全部生成在 Corpus 级别的 Dist-1 / Dist-2 ─────────────────────────
     if len(all_pred_tokens_corpus) > 0:
         corpus_dist_1 = len(set(all_pred_tokens_corpus)) / len(all_pred_tokens_corpus)
@@ -510,7 +493,7 @@ if __name__ == "__main__":
         item["metrics"]["dist1_corpus"] = corpus_dist_1
         item["metrics"]["dist2_corpus"] = corpus_dist_2
     
-    output_jsonl_path = "eval_results.jsonl"
+    output_jsonl_path = f"eval_results_{lr}_{int(ratio*100)}.jsonl"
     with open(output_jsonl_path, "w", encoding="utf-8") as f:
         for item in all_results:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")

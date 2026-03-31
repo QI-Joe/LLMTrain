@@ -163,12 +163,6 @@ class GenerationTrainer:
                              
                     total_loss += loss.item()
                     pbar.set_postfix({'loss': loss.item()})
-                
-                # Intermediate Validation condition (80% of batches)
-                # if (step + 1) == val_trigger_step:
-                #      self.logger.info(f"Running Intermediate Validation at step {step+1}/{total_batches}...")
-                #      self.evaluate_epoch(epoch, self.val_loader, f"val_inter_ep{epoch}", save=False)
-                #      self.model.train()
 
             # --- End of Epoch Evaluation ---
             self.logger.info(f"Epoch {epoch} completed. Running End-of-Epoch Evaluation...")
@@ -187,8 +181,8 @@ class GenerationTrainer:
                  
                  # Combine results
                  # Mark split in results to distinguish?
-                #  for res in val_results: res['split'] = 'val'
-                #  for res in test_results: res['split'] = 'test'
+                 for res in val_results: res['split'] = 'val'
+                 for res in test_results: res['split'] = 'test'
                  
                 #  combined_results = val_results + test_results
                 #  self.save_eval_results(combined_results, epoch, "final_combined")
@@ -222,6 +216,7 @@ class GenerationTrainer:
                 loss_val = outputs.loss.item()
                 acc_val = calculate_accuracy(outputs.logits, batch['labels'])
                 ppl_samples = calculate_per_sample_ppl(outputs.logits, batch['labels'])
+                pbar.set_postfix({'loss': loss_val})
                 
                 batch_loss_mean.append(loss_val)
                 batch_acc_mean.append(acc_val)

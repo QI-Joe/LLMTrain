@@ -15,7 +15,7 @@ class GenTrainingConfig(TrainingConfig):
     # 覆盖默认值 (Override defaults)
     prompt_key: str = "input_text"  # 生成任务特定的Prompt键名
     data_path: str = r'../data/'
-    data_dir: str = r'data/ED'
+    data_dir: str = r'./data/ED'
     device: str = '0'
     
     # 新增生成特定参数 (New generation-specific parameters)
