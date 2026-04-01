@@ -53,7 +53,7 @@ class IAMMTrainer(Trainer):
         emotion_labels = inputs.pop("emotion_label")
         
         # Forward pass 1: Context (Text Generation)
-        outputs = model(
+        outputs = model.forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,

@@ -21,6 +21,9 @@ from peft import LoraConfig, get_peft_model, TaskType
 from ZGeneration.train_gen_fast_LM import calculate_per_sample_ppl
 import nltk
 from nltk.translate.bleu_score import sentence_bleu
+from data_module import EmpathyDataset as EmpathyDataset_old
+from data_module import IAMMDataCollator
+from train_module import EmotionHead
 
 class RecordTrainer(Trainer):
     def __init__(self, *args, **kwargs):
@@ -134,11 +137,15 @@ class EmpathyDataset(Dataset):
 
 
 # ─── 训练函数 ─────────────────────────────────────────────────────────────────
-def run_training(train_context: np.ndarray, train_target: np.ndarray, SYSTEM_PROMPT: str, SEED: int, run_dir: str) -> None:
+def run_training(train_context: np.ndarray, train_target: np.ndarray,\
+    train_sit, train_emo, \
+    SYSTEM_PROMPT: str, SEED: int, run_dir: str) -> None:
     global lr
     print("Building training dataset ...")
-    train_dataset = EmpathyDataset(
-        train_context, train_target, tokenizer, SYSTEM_PROMPT, max_length=512
+    train_dataset = EmpathyDataset_old(
+        train_context, train_target, \
+        train_sit, train_emo, \
+        tokenizer, SYSTEM_PROMPT, max_length=512, sit_max_length=128
     )
     print(f"Training samples: {len(train_dataset)}\n")
 
@@ -162,12 +169,9 @@ def run_training(train_context: np.ndarray, train_target: np.ndarray, SYSTEM_PRO
         remove_unused_columns=False,         # 必须关闭，否则 Trainer 会删掉自定义字段
     )
 
-    data_collator = DataCollatorForSeq2Seq(
+    data_collator = IAMMDataCollator(
         tokenizer=tokenizer,
-        model=model,
-        padding=True,
-        pad_to_multiple_of=8,
-        label_pad_token_id=-100,
+        # model=model,
     )
 
     tensors_dir = os.path.join(run_dir, "tensors")
@@ -366,10 +370,17 @@ if __name__ == "__main__":
 
 
     # ── 加载数据 ──────────────────────────────────────────────────────────────
-    train_context = np.load(os.path.join('data/ED', 'sys_dialog_texts.train.npy'),  allow_pickle=True)
-    train_target  = np.load(os.path.join('data/ED', 'sys_target_texts.train.npy'),  allow_pickle=True)
-    test_context  = np.load(os.path.join('data/ED', 'sys_dialog_texts.test.npy'),   allow_pickle=True)
-    test_target   = np.load(os.path.join('data/ED', 'sys_target_texts.test.npy'),   allow_pickle=True)
+    root_data = 'data/ED'
+    train_context = np.load(os.path.join(root_data, 'sys_dialog_texts.train.npy'),  allow_pickle=True)
+    train_target  = np.load(os.path.join(root_data, 'sys_target_texts.train.npy'),  allow_pickle=True)
+    
+    train_sit     = np.load(os.path.join(root_data, 'sys_situation_texts.train.npy'), allow_pickle=True)
+    train_emo     = np.load(os.path.join(root_data, 'sys_emotion_texts.train.npy'), allow_pickle=True)
+
+    test_context = np.load(os.path.join(root_data, 'sys_dialog_texts.test.npy'), allow_pickle=True)
+    test_target  = np.load(os.path.join(root_data, 'sys_target_texts.test.npy'), allow_pickle=True)
+    test_sit     = np.load(os.path.join(root_data, 'sys_situation_texts.test.npy'), allow_pickle=True)
+    test_emo     = np.load(os.path.join(root_data, 'sys_emotion_texts.test.npy'), allow_pickle=True)
 
     assert len(train_context) == len(train_target), "train split length mismatch"
     assert len(test_context)  == len(test_target),  "test split length mismatch"
@@ -380,8 +391,8 @@ if __name__ == "__main__":
     indices = np.random.choice(len(train_context), size=int(len(train_context) * ratio), replace=False)
     train_context = train_context[indices]
     train_target  = train_target[indices]
-
-
+    train_sit = train_sit[indices]
+    train_emo = train_emo[indices]
 
     # ─── 加载模型 & Tokenizer ─────────────────────────────────────────────────────
     print(f"Loading model ...")
@@ -430,13 +441,13 @@ if __name__ == "__main__":
 
 
     # ── 微调（adapter 已存在则跳过，方便重复实验）────────────────────────────
-    run_dir = f"./LM_llama3_8B/llama3_lora_empathy_{lr}_{int(ratio*100)}"
+    run_dir = f"./LM_llama3_8B/llama3_Datacollector_dataset_{lr}_{int(ratio*100)}"
     os.makedirs(run_dir, exist_ok=True)
 
     LORA_ADAPTER_PATH = os.path.join(run_dir, "final_adapter")
 
     if not os.path.exists(LORA_ADAPTER_PATH) or new_model_train:
-        run_training(train_context, train_target, SYSTEM_PROMPT, SEED, run_dir)
+        run_training(train_context, train_target, train_sit, train_emo, SYSTEM_PROMPT, SEED, run_dir)
     else:
         print(f"Found existing LoRA adapter at '{LORA_ADAPTER_PATH}', skipping training.\n")
         model.load_adapter(LORA_ADAPTER_PATH, adapter_name="default")    # ← 加载保存的 adapter

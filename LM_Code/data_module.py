@@ -73,7 +73,7 @@ class EmpathyDataset(Dataset):
 
             self.samples.append({
                 "input_ids": torch.tensor(full_ids, dtype=torch.long),
-                "attention_mask": torch.tensor(full_mask, dtype=torch.long),
+                # "attention_mask": torch.tensor(full_mask, dtype=torch.long),
                 "labels": torch.tensor(labels, dtype=torch.long),
                 "situation_input_ids": torch.tensor(sit_inputs["input_ids"], dtype=torch.long),
                 "situation_attention_mask": torch.tensor(sit_inputs["attention_mask"], dtype=torch.long),
@@ -92,13 +92,15 @@ class EmpathyDataset(Dataset):
 class IAMMDataCollator:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
-        self.base_collator = DataCollatorForSeq2Seq(tokenizer, padding=True, label_pad_token_id=-100)
+        self.base_collator = DataCollatorForSeq2Seq(tokenizer, padding=True, pad_to_multiple_of=8,label_pad_token_id=-100)
         
     def __call__(self, features):
         main_features = [
-            {"input_ids": f["input_ids"], "attention_mask": f["attention_mask"], "labels": f["labels"]}
+            {"input_ids": f["input_ids"], "labels": f["labels"]}
             for f in features
         ]
+        
+        # 调用 base_collator 后，batch 字典中会自动多出一个补齐后的 "attention_mask" 键 
         batch = self.base_collator(main_features)
         
         sit_features = [

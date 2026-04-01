@@ -176,7 +176,6 @@ if __name__ == "__main__":
     emo_correct = 0
 
     all_results = []
-    all_pred_tokens_corpus = []
 
     print("Evaluating...")
     for i in range(len(test_context)):
@@ -213,9 +212,6 @@ if __name__ == "__main__":
         qshbleu1 += qshb1; qshbleu2 += qshb2
         ppl_total += ppl; sample_ppl_total += sample_ppl
 
-        pred_tokens = generated.strip().split()
-        all_pred_tokens_corpus.extend(pred_tokens)
-
         all_results.append({
             "id": i,
             "reference": reference,
@@ -229,12 +225,22 @@ if __name__ == "__main__":
             }
         })
 
-    if len(all_pred_tokens_corpus) > 0:
-        corpus_dist_1 = len(set(all_pred_tokens_corpus)) / len(all_pred_tokens_corpus)
-        bigrams = list(zip(all_pred_tokens_corpus, all_pred_tokens_corpus[1:]))
-        corpus_dist_2 = len(set(bigrams)) / len(bigrams) if len(bigrams) > 0 else 0
-    else:
-        corpus_dist_1, corpus_dist_2 = 0.0, 0.0
+    unigrams = set()
+    bigrams = set()
+    total_unigrams = 0
+    total_bigrams = 0
+    
+    for item in all_results:
+        tokens = item["generated"].strip().split()
+        for idx in range(len(tokens)):
+            unigrams.add(tokens[idx])
+            total_unigrams += 1
+            if idx < len(tokens) - 1:
+                bigrams.add((tokens[idx], tokens[idx+1]))
+                total_bigrams += 1
+
+    corpus_dist_1 = len(unigrams) / total_unigrams if total_unigrams > 0 else 0.0
+    corpus_dist_2 = len(bigrams) / total_bigrams if total_bigrams > 0 else 0.0
 
     print(f"Emotion Accuracy: {emo_correct / len(test_context):.4f}")
     print(f"Average PPL: {ppl_total / len(test_context):.4f}")
