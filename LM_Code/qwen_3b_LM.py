@@ -343,11 +343,13 @@ def compute_bleu(pred_t, ref_t):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train and evaluate the model.")
     parser.add_argument('--ratio', type=float, default = 0.1, help = "dataset ratio")
+    parser.add_argument('--model_name', type=str, default = 'llama-3.2-1B')
     
     args = parser.parse_args()
 
     fname = './qwen11.txt'
     lr, ratio = 2e-5, args.ratio
+    model_name = args.model_name
     new_model_train = True
     print(f"[ratio] the ratio be {args.ratio}")
     # original_stdout, original_stderr, logger, stderr_logger = Logging_and_Data_Initialization(fname)
@@ -392,8 +394,8 @@ if __name__ == "__main__":
     print(f"Loading model ...")
 
     tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path="../../LLModel/llama3.1-8B-Instruct",
-        cache_dir='./llama3-8B/',
+        pretrained_model_name_or_path=f"../../LLModel/{model_name}",
+        cache_dir=f'./{model_name}/',
         force_download=False,
     )
 
@@ -403,10 +405,10 @@ if __name__ == "__main__":
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path="../../LLModel/llama3.1-8B-Instruct",
+        pretrained_model_name_or_path=f"../../LLModel/{model_name}",
         torch_dtype=torch.float16,   # 显存不足可换 torch.bfloat16
         device_map="auto",           # 自动分配到 GPU / CPU
-        cache_dir='./llama3-8B/',
+        cache_dir=f'./{model_name}/',
         force_download=False,
     )
 
@@ -435,7 +437,7 @@ if __name__ == "__main__":
 
 
     # ── 微调（adapter 已存在则跳过，方便重复实验）────────────────────────────
-    run_dir = f"./LM_llama3_8B/llama3_lora_empathy_{lr}_{int(ratio*100)}"
+    run_dir = f"./LM_{model_name}/llama32_lora_empathy_{lr}_{int(ratio*100)}"
     os.makedirs(run_dir, exist_ok=True)
 
     LORA_ADAPTER_PATH = os.path.join(run_dir, "final_adapter")
@@ -496,6 +498,11 @@ if __name__ == "__main__":
 
         pred_tokens = generated.strip().split()
         all_pred_tokens_corpus.extend(pred_tokens)
+
+        # 记录单条评估结果
+        instance_dist_1 = len(set(pred_tokens)) / len(pred_tokens) if len(pred_tokens) > 0 else 0
+        instance_bigrams = list(zip(pred_tokens, pred_tokens[1:]))
+        instance_dist_2 = len(set(instance_bigrams)) / len(instance_bigrams) if len(instance_bigrams) > 0 else 0
 
         all_results.append({
             "id": i,

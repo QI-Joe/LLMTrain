@@ -22,19 +22,27 @@ from ZGeneration.train_gen_fast_LM import calculate_per_sample_ppl
 import nltk
 from nltk.translate.bleu_score import sentence_bleu
 from data_module import EmpathyDataset as EmpathyDataset_old
-from data_module import IAMMDataCollator
+from data_module import IAMMDataCollator, EMOTION_MAP
 from train_module import EmotionHead
+from src_analysis.metrics_func import calc_distinct
+
 
 class RecordTrainer(Trainer):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, emo_head, *args, **kwargs):
         self.base_dir = kwargs.pop('base_dir', './')
         self.pt_name = kwargs.pop('pt_name', 'record_tensors')
         super().__init__(*args, **kwargs)
+        self.emo_head = emo_head.to(self.args.device) # step 4
+        self.loss_fct = nn.CrossEntropyLoss() # step 5
     
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.pop("labels")
         input_ids = inputs.pop("input_ids")
         attention_mask = inputs.pop("attention_mask")
+        
+        situation_ids = inputs.pop("situation_input_ids")
+        situation_mask = inputs.pop("situation_attention_mask")
+        emotion_labels = inputs.pop("emotion_label")
         
         outputs = model.forward(
             input_ids=input_ids,
@@ -44,6 +52,20 @@ class RecordTrainer(Trainer):
         )
         
         loss = outputs.loss
+        
+        sit_outputs = model(
+            input_ids=situation_ids,
+            attention_mask=situation_mask,
+            output_hidden_states=True
+        )
+        
+        last_hidden_states = sit_outputs.hidden_states[-1]
+        device = last_hidden_states.device
+        
+        emo_logits = self.emo_head(last_hidden_states, attention_mask=situation_mask.to(device))
+        sit_emo_loss = self.loss_fct(emo_logits, emotion_labels.to(device))
+        
+        total_loss = loss # + sit_emo_loss step 2 in night
         
         if (self.state.global_step+1) % 100 == 0:  # 每 100 步保存一次
             last_hidden_states = outputs.hidden_states[-1].detach().cpu()
@@ -58,8 +80,19 @@ class RecordTrainer(Trainer):
                 "last_hidden_states": last_hidden_states
             }, os.path.join(self.base_dir, f"{self.pt_name}_{self.state.global_step}.pt"))
 
-        return (loss, outputs) if return_outputs else loss
-    
+        return (total_loss, outputs) if return_outputs else total_loss
+    # step 3 in night, optimizer is not the case
+    def create_optimizer(self):
+        if self.optimizer is None:
+            params = [p for p in self.model.parameters() if p.requires_grad] # + list(self.emo_head.parameters())
+            from torch.optim import AdamW
+            self.optimizer = AdamW(
+                params,
+                lr=self.args.learning_rate,
+                weight_decay=self.args.weight_decay
+            )
+        return self.optimizer
+
 
 # ─── Dataset ──────────────────────────────────────────────────────────────────
 class EmpathyDataset(Dataset):
@@ -152,7 +185,7 @@ def run_training(train_context: np.ndarray, train_target: np.ndarray,\
     training_args = TrainingArguments(
         output_dir=os.path.join(run_dir, "checkpoints"),
         seed=SEED,
-        num_train_epochs=7,
+        num_train_epochs=3,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=8,       # effective batch size = 16
         learning_rate=lr,
@@ -177,7 +210,12 @@ def run_training(train_context: np.ndarray, train_target: np.ndarray,\
     tensors_dir = os.path.join(run_dir, "tensors")
     os.makedirs(tensors_dir, exist_ok=True)
 
+    emo_head = EmotionHead(
+        hidden_size=model.config.hidden_size,
+        num_emotions = len(EMOTION_MAP),
+    )
     trainer = RecordTrainer(
+        emo_head=emo_head,
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -192,7 +230,10 @@ def run_training(train_context: np.ndarray, train_target: np.ndarray,\
 
     model.save_pretrained(LORA_ADAPTER_PATH)
     tokenizer.save_pretrained(LORA_ADAPTER_PATH)
+    emo_head.save(LORA_ADAPTER_PATH)
     print(f"LoRA adapter saved → {LORA_ADAPTER_PATH}\n")
+    
+    return emo_head
 
 
 
@@ -441,13 +482,13 @@ if __name__ == "__main__":
 
 
     # ── 微调（adapter 已存在则跳过，方便重复实验）────────────────────────────
-    run_dir = f"./LM_llama3_8B/llama3_Datacollector_dataset_{lr}_{int(ratio*100)}"
+    run_dir = f"./LM_llama3_8B/llama3_Cancel_Loss_Explict_{lr}_{int(ratio*100)}"
     os.makedirs(run_dir, exist_ok=True)
 
     LORA_ADAPTER_PATH = os.path.join(run_dir, "final_adapter")
 
     if not os.path.exists(LORA_ADAPTER_PATH) or new_model_train:
-        run_training(train_context, train_target, train_sit, train_emo, SYSTEM_PROMPT, SEED, run_dir)
+        emo_head = run_training(train_context, train_target, train_sit, train_emo, SYSTEM_PROMPT, SEED, run_dir)
     else:
         print(f"Found existing LoRA adapter at '{LORA_ADAPTER_PATH}', skipping training.\n")
         model.load_adapter(LORA_ADAPTER_PATH, adapter_name="default")    # ← 加载保存的 adapter
@@ -504,9 +545,9 @@ if __name__ == "__main__":
         all_pred_tokens_corpus.extend(pred_tokens)
 
         # 记录单条评估结果
-        instance_dist_1 = len(set(pred_tokens)) / len(pred_tokens) if len(pred_tokens) > 0 else 0
-        instance_bigrams = list(zip(pred_tokens, pred_tokens[1:]))
-        instance_dist_2 = len(set(instance_bigrams)) / len(instance_bigrams) if len(instance_bigrams) > 0 else 0
+        # instance_dist_1 = len(set(pred_tokens)) / len(pred_tokens) if len(pred_tokens) > 0 else 0
+        # instance_bigrams = list(zip(pred_tokens, pred_tokens[1:]))
+        # instance_dist_2 = len(set(instance_bigrams)) / len(instance_bigrams) if len(instance_bigrams) > 0 else 0
 
         all_results.append({
             "id": i,
@@ -525,13 +566,7 @@ if __name__ == "__main__":
             }
         })
 
-    # ── 计算全部生成在 Corpus 级别的 Dist-1 / Dist-2 ─────────────────────────
-    if len(all_pred_tokens_corpus) > 0:
-        corpus_dist_1 = len(set(all_pred_tokens_corpus)) / len(all_pred_tokens_corpus)
-        bigrams = list(zip(all_pred_tokens_corpus, all_pred_tokens_corpus[1:]))
-        corpus_dist_2 = len(set(bigrams)) / len(bigrams) if len(bigrams) > 0 else 0
-    else:
-        corpus_dist_1, corpus_dist_2 = 0.0, 0.0
+    corpus_dist_1, corpus_dist_2 = calc_distinct([res["generated"] for res in all_results], tokenizer)
 
     print(f"Average PPL: {ppl_total / len(test_context):.4f}")
     print(f"Average Sample PPL: {sample_ppl_total / len(test_context):.4f}")
