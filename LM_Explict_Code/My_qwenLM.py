@@ -21,12 +21,12 @@ from peft import LoraConfig, get_peft_model, TaskType
 from ZGeneration.train_gen_fast_LM import calculate_per_sample_ppl
 import nltk
 from nltk.translate.bleu_score import sentence_bleu
+from LM_Code.data_module import EmpathyDataset as EmpathyDataset_old
+from LM_Code.data_module import IAMMDataCollator, EMOTION_MAP
+from LM_Code.train_module import EmotionHead
+from src_analysis.metrics_func import calc_distinct
 import argparse
 
-from data_module import EmpathyDataset as EmpathyDataset_old
-from data_module import IAMMDataCollator, EMOTION_MAP
-from train_module import EmotionHead
-from src_analysis.metrics_func import calc_distinct
 
 class RecordTrainer(Trainer):
     def __init__(self, emo_head, *args, **kwargs):
@@ -49,40 +49,64 @@ class RecordTrainer(Trainer):
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
-            output_hidden_states=True
+            output_hidden_states=True,
+            use_cache=False
         )
         
         loss = outputs.loss
-        
-        sit_outputs = model(
-            input_ids=situation_ids,
-            attention_mask=situation_mask,
-            output_hidden_states=True
-        )
-        
-        last_hidden_states = sit_outputs.hidden_states[-1]
-        device = last_hidden_states.device
-        
-        emo_logits = self.emo_head(last_hidden_states, attention_mask=situation_mask.to(device))
-        sit_emo_loss = self.loss_fct(emo_logits, emotion_labels.to(device))
-        
-        total_loss = loss # + sit_emo_loss step 2 in night
+        '''
+        with torch.no_grad():
+            sit_outputs = model(
+                input_ids=situation_ids,
+                attention_mask=situation_mask,
+                output_hidden_states=True,
+                use_cache=False
+            )
+            
+            last_hidden_states = sit_outputs.hidden_states[-1]
+            device = last_hidden_states.device
+            
+            emo_logits = self.emo_head(last_hidden_states, attention_mask=situation_mask.to(device))
+            sit_emo_loss = self.loss_fct(emo_logits, emotion_labels.to(device))
+        '''
+        total_loss = loss # + 0.05 * sit_emo_loss # step try to lower the affection of emotion label
         
         if (self.state.global_step+1) % 100 == 0:  # 每 100 步保存一次
             last_hidden_states = outputs.hidden_states[-1].detach().cpu()
             input_ids = input_ids.detach().cpu()
             attention_mask = attention_mask.detach().cpu()
             labels = labels.detach().cpu()
+            logits = outputs.logits.detach().cpu()
             
             torch.save({
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
                 "labels": labels,
-                "last_hidden_states": last_hidden_states
+                "last_hidden_states": last_hidden_states,
+                'logits': logits,
             }, os.path.join(self.base_dir, f"{self.pt_name}_{self.state.global_step}.pt"))
 
         return (total_loss, outputs) if return_outputs else total_loss
     
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        # 调用父类的 training_step 进行前向和反向传播（loss.backward() 在这里面被调用）
+        # 兼容不同版本的 transformers Trainer
+        if 'num_items_in_batch' in inputs:
+            loss = super().training_step(model, inputs, num_items_in_batch=num_items_in_batch)
+        else:
+            loss = super().training_step(model, inputs)
+            
+        # 打印前 10 步的梯度 L2 范数
+        if self.state.global_step < 10:
+            # Llama 3 8B 最后一层是 31，寻找 down_proj 相关的 LoRA 权重
+            for name, param in model.named_parameters():
+                # 我们过滤找 layers.31.mlp.down_proj 且需要梯度的层
+                if "layers.31.mlp.down_proj" in name and param.grad is not None:
+                    grad_norm = torch.norm(param.grad, p=2).item()
+                    print(f"[Grad Trace] Step {self.state.global_step} - {name} grad L2 norm: {grad_norm}")
+        
+        return loss
+
     # step 3 in night, optimizer is not the case
     def create_optimizer(self):
         if self.optimizer is None:
@@ -94,7 +118,7 @@ class RecordTrainer(Trainer):
                 weight_decay=self.args.weight_decay
             )
         return self.optimizer
-    
+
 
 # ─── Dataset ──────────────────────────────────────────────────────────────────
 class EmpathyDataset(Dataset):
@@ -263,12 +287,15 @@ def multi_turn_chat_with_ppl(
     inputs = tokenizer(context_text, return_tensors="pt").to(DEVICE)
 
     with torch.no_grad():
+        np.random.seed(SEED)
+        torch.manual_seed(SEED)
+        torch.cuda.manual_seed(SEED)
         output_ids = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
-            do_sample=True,
+            do_sample=False, # 关闭采样，保证生成结果稳定，便于分析指标分布；需要多样性时可改为 True
             pad_token_id=tokenizer.eos_token_id,
         )
 
@@ -389,15 +416,15 @@ def compute_bleu(pred_t, ref_t):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train and evaluate the model.")
     parser.add_argument('--ratio', type=float, default = 0.1, help = "dataset ratio")
-    parser.add_argument('--model_name', type=str, default = 'llama-3.2-1B')
+    parser.add_argument('--new_model_train', action='store_true', help='Whether to train a new model even if an adapter already exists.')
+    parser.add_argument('--task1', type=str, default='evaluation', help='Task to perform: "training" or "evaluation".')
+    parser.add_argument('--task2', type=str, default='kv_cache_have', help='Task to perform: "training" or "evaluation".')
     
     args = parser.parse_args()
 
     fname = './qwen11.txt'
     lr, ratio = 2e-5, args.ratio
-    model_name = args.model_name
-    new_model_train = True
-    print(f"[ratio] the ratio be {args.ratio}")
+    new_model_train = args.new_model_train
     # original_stdout, original_stderr, logger, stderr_logger = Logging_and_Data_Initialization(fname)
 
 
@@ -447,8 +474,8 @@ if __name__ == "__main__":
     print(f"Loading model ...")
 
     tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=f"../../LLModel/{model_name}",
-        cache_dir=f'./{model_name}/',
+        pretrained_model_name_or_path="../../LLModel/llama3.1-8B-Instruct",
+        cache_dir='./llama3-8B/',
         force_download=False,
     )
 
@@ -458,10 +485,10 @@ if __name__ == "__main__":
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=f"../../LLModel/{model_name}",
+        pretrained_model_name_or_path="../../LLModel/llama3.1-8B-Instruct",
         torch_dtype=torch.float16,   # 显存不足可换 torch.bfloat16
         device_map="auto",           # 自动分配到 GPU / CPU
-        cache_dir=f'./{model_name}/',
+        cache_dir='./llama3-8B/',
         force_download=False,
     )
 
@@ -490,7 +517,7 @@ if __name__ == "__main__":
 
 
     # ── 微调（adapter 已存在则跳过，方便重复实验）────────────────────────────
-    run_dir = f"./LM_{model_name}/llama32_lora_empathy_{lr}_{int(ratio*100)}"
+    run_dir = f"./LM_llama3_8B/llama3_{args.task1}_{lr}_{int(ratio*100)}"
     os.makedirs(run_dir, exist_ok=True)
 
     LORA_ADAPTER_PATH = os.path.join(run_dir, "final_adapter")
@@ -573,6 +600,13 @@ if __name__ == "__main__":
                 "my_bleu2": qshb2,
             }
         })
+        
+        if (i + 1) % 100 == 0:
+            print(f"Evaluated {i + 1}/{len(test_context)} samples ...")
+            print(f"[Round {i+1}] Average PPL: {ppl_total / (i+1):.4f}")
+            print(f"[Round {i+1}] Average Sample PPL: {sample_ppl_total / (i+1):.4f}")
+            print(f"[Round {i+1}] Average BLEU-1: {bleu1_total / (i+1):.4f}")
+            print(f"[Round {i+1}] Average BLEU-2: {bleu2_total / (i+1):.4f}")
 
     corpus_dist_1, corpus_dist_2 = calc_distinct([res["generated"] for res in all_results], tokenizer)
 
@@ -591,6 +625,8 @@ if __name__ == "__main__":
         item["metrics"]["dist2_corpus"] = corpus_dist_2
     
     output_jsonl_path = os.path.join(run_dir, f"eval_results_{lr}_{int(ratio*100)}.jsonl")
+    if not new_model_train:
+        output_jsonl_path = os.path.join(run_dir, f"eval_results_{lr}_{int(ratio*100)}_eval_{args.task1}_{args.task2}.jsonl")
     with open(output_jsonl_path, "w", encoding="utf-8") as f:
         for item in all_results:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")

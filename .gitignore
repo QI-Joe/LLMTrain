@@ -9,3 +9,8 @@ __pycache__/
 *.sh
 llama3-8B/
 *.txt
+Qwen3-4B/
+llama8B_result/
+LM_llama3_8B/
+LM_llama-3.2-1B/
+LM_Llama3.2-3B/

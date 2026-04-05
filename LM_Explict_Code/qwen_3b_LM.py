@@ -23,9 +23,9 @@ import nltk
 from nltk.translate.bleu_score import sentence_bleu
 import argparse
 
-from data_module import EmpathyDataset as EmpathyDataset_old
-from data_module import IAMMDataCollator, EMOTION_MAP
-from train_module import EmotionHead
+from LM_Code.data_module import EmpathyDataset as EmpathyDataset_old
+from LM_Code.data_module import IAMMDataCollator, EMOTION_MAP
+from LM_Code.data_module import EmotionHead
 from src_analysis.metrics_func import calc_distinct
 
 class RecordTrainer(Trainer):
@@ -49,11 +49,13 @@ class RecordTrainer(Trainer):
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
-            output_hidden_states=True
+            output_hidden_states=True,
+            use_cache=False
         )
         
         loss = outputs.loss
         
+        """
         sit_outputs = model(
             input_ids=situation_ids,
             attention_mask=situation_mask,
@@ -65,7 +67,7 @@ class RecordTrainer(Trainer):
         
         emo_logits = self.emo_head(last_hidden_states, attention_mask=situation_mask.to(device))
         sit_emo_loss = self.loss_fct(emo_logits, emotion_labels.to(device))
-        
+        """
         total_loss = loss # + sit_emo_loss step 2 in night
         
         if (self.state.global_step+1) % 100 == 0:  # 每 100 步保存一次
@@ -86,7 +88,7 @@ class RecordTrainer(Trainer):
     # step 3 in night, optimizer is not the case
     def create_optimizer(self):
         if self.optimizer is None:
-            params = [p for p in self.model.parameters() if p.requires_grad] + list(self.emo_head.parameters())
+            params = [p for p in self.model.parameters() if p.requires_grad] # + list(self.emo_head.parameters())
             from torch.optim import AdamW
             self.optimizer = AdamW(
                 params,
@@ -263,12 +265,15 @@ def multi_turn_chat_with_ppl(
     inputs = tokenizer(context_text, return_tensors="pt").to(DEVICE)
 
     with torch.no_grad():
+        np.random.seed(SEED)
+        torch.manual_seed(SEED)
+        torch.cuda.manual_seed(SEED)
         output_ids = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
-            do_sample=True,
+            do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
         )
 

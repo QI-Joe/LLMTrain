@@ -23,50 +23,26 @@ import nltk
 from nltk.translate.bleu_score import sentence_bleu
 import argparse
 
-from data_module import EmpathyDataset as EmpathyDataset_old
-from data_module import IAMMDataCollator, EMOTION_MAP
-from train_module import EmotionHead
-from src_analysis.metrics_func import calc_distinct
-
 class RecordTrainer(Trainer):
-    def __init__(self, emo_head, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         self.base_dir = kwargs.pop('base_dir', './')
         self.pt_name = kwargs.pop('pt_name', 'record_tensors')
         super().__init__(*args, **kwargs)
-        self.emo_head = emo_head.to(self.args.device) # step 4
-        self.loss_fct = nn.CrossEntropyLoss() # step 5
     
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.pop("labels")
         input_ids = inputs.pop("input_ids")
         attention_mask = inputs.pop("attention_mask")
         
-        situation_ids = inputs.pop("situation_input_ids")
-        situation_mask = inputs.pop("situation_attention_mask")
-        emotion_labels = inputs.pop("emotion_label")
-        
         outputs = model.forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
-            output_hidden_states=True
+            output_hidden_states=True,
+            use_cache=False,
         )
         
         loss = outputs.loss
-        
-        sit_outputs = model(
-            input_ids=situation_ids,
-            attention_mask=situation_mask,
-            output_hidden_states=True
-        )
-        
-        last_hidden_states = sit_outputs.hidden_states[-1]
-        device = last_hidden_states.device
-        
-        emo_logits = self.emo_head(last_hidden_states, attention_mask=situation_mask.to(device))
-        sit_emo_loss = self.loss_fct(emo_logits, emotion_labels.to(device))
-        
-        total_loss = loss # + sit_emo_loss step 2 in night
         
         if (self.state.global_step+1) % 100 == 0:  # 每 100 步保存一次
             last_hidden_states = outputs.hidden_states[-1].detach().cpu()
@@ -81,19 +57,7 @@ class RecordTrainer(Trainer):
                 "last_hidden_states": last_hidden_states
             }, os.path.join(self.base_dir, f"{self.pt_name}_{self.state.global_step}.pt"))
 
-        return (total_loss, outputs) if return_outputs else total_loss
-    
-    # step 3 in night, optimizer is not the case
-    def create_optimizer(self):
-        if self.optimizer is None:
-            params = [p for p in self.model.parameters() if p.requires_grad] + list(self.emo_head.parameters())
-            from torch.optim import AdamW
-            self.optimizer = AdamW(
-                params,
-                lr=self.args.learning_rate,
-                weight_decay=self.args.weight_decay
-            )
-        return self.optimizer
+        return (loss, outputs) if return_outputs else loss
     
 
 # ─── Dataset ──────────────────────────────────────────────────────────────────
@@ -172,15 +136,11 @@ class EmpathyDataset(Dataset):
 
 
 # ─── 训练函数 ─────────────────────────────────────────────────────────────────
-def run_training(train_context: np.ndarray, train_target: np.ndarray,\
-    train_sit, train_emo, \
-    SYSTEM_PROMPT: str, SEED: int, run_dir: str) -> None:
+def run_training(train_context: np.ndarray, train_target: np.ndarray, SYSTEM_PROMPT: str, SEED: int, run_dir: str) -> None:
     global lr
     print("Building training dataset ...")
-    train_dataset = EmpathyDataset_old(
-        train_context, train_target, \
-        train_sit, train_emo, \
-        tokenizer, SYSTEM_PROMPT, max_length=512, sit_max_length=128
+    train_dataset = EmpathyDataset(
+        train_context, train_target, tokenizer, SYSTEM_PROMPT, max_length=512
     )
     print(f"Training samples: {len(train_dataset)}\n")
 
@@ -204,20 +164,18 @@ def run_training(train_context: np.ndarray, train_target: np.ndarray,\
         remove_unused_columns=False,         # 必须关闭，否则 Trainer 会删掉自定义字段
     )
 
-    data_collator = IAMMDataCollator(
+    data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
-        # model=model,
+        model=model,
+        padding=True,
+        pad_to_multiple_of=8,
+        label_pad_token_id=-100,
     )
 
     tensors_dir = os.path.join(run_dir, "tensors")
     os.makedirs(tensors_dir, exist_ok=True)
 
-    emo_head = EmotionHead(
-        hidden_size=model.config.hidden_size,
-        num_emotions = len(EMOTION_MAP),
-    )
     trainer = RecordTrainer(
-        emo_head=emo_head,
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -232,10 +190,7 @@ def run_training(train_context: np.ndarray, train_target: np.ndarray,\
 
     model.save_pretrained(LORA_ADAPTER_PATH)
     tokenizer.save_pretrained(LORA_ADAPTER_PATH)
-    emo_head.save(LORA_ADAPTER_PATH)
     print(f"LoRA adapter saved → {LORA_ADAPTER_PATH}\n")
-    
-    return emo_head
 
 
 
@@ -263,12 +218,15 @@ def multi_turn_chat_with_ppl(
     inputs = tokenizer(context_text, return_tensors="pt").to(DEVICE)
 
     with torch.no_grad():
+        np.random.seed(SEED)
+        torch.manual_seed(SEED)
+        torch.cuda.manual_seed(SEED)
         output_ids = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
-            do_sample=True,
+            do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
         )
 
@@ -389,13 +347,11 @@ def compute_bleu(pred_t, ref_t):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train and evaluate the model.")
     parser.add_argument('--ratio', type=float, default = 0.1, help = "dataset ratio")
-    parser.add_argument('--model_name', type=str, default = 'llama-3.2-1B')
     
     args = parser.parse_args()
 
     fname = './qwen11.txt'
     lr, ratio = 2e-5, args.ratio
-    model_name = args.model_name
     new_model_train = True
     print(f"[ratio] the ratio be {args.ratio}")
     # original_stdout, original_stderr, logger, stderr_logger = Logging_and_Data_Initialization(fname)
@@ -419,17 +375,10 @@ if __name__ == "__main__":
 
 
     # ── 加载数据 ──────────────────────────────────────────────────────────────
-    root_data = 'data/ED'
-    train_context = np.load(os.path.join(root_data, 'sys_dialog_texts.train.npy'),  allow_pickle=True)
-    train_target  = np.load(os.path.join(root_data, 'sys_target_texts.train.npy'),  allow_pickle=True)
-    
-    train_sit     = np.load(os.path.join(root_data, 'sys_situation_texts.train.npy'), allow_pickle=True)
-    train_emo     = np.load(os.path.join(root_data, 'sys_emotion_texts.train.npy'), allow_pickle=True)
-
-    test_context = np.load(os.path.join(root_data, 'sys_dialog_texts.test.npy'), allow_pickle=True)
-    test_target  = np.load(os.path.join(root_data, 'sys_target_texts.test.npy'), allow_pickle=True)
-    test_sit     = np.load(os.path.join(root_data, 'sys_situation_texts.test.npy'), allow_pickle=True)
-    test_emo     = np.load(os.path.join(root_data, 'sys_emotion_texts.test.npy'), allow_pickle=True)
+    train_context = np.load(os.path.join('data/ED', 'sys_dialog_texts.train.npy'),  allow_pickle=True)
+    train_target  = np.load(os.path.join('data/ED', 'sys_target_texts.train.npy'),  allow_pickle=True)
+    test_context  = np.load(os.path.join('data/ED', 'sys_dialog_texts.test.npy'),   allow_pickle=True)
+    test_target   = np.load(os.path.join('data/ED', 'sys_target_texts.test.npy'),   allow_pickle=True)
 
     assert len(train_context) == len(train_target), "train split length mismatch"
     assert len(test_context)  == len(test_target),  "test split length mismatch"
@@ -440,15 +389,15 @@ if __name__ == "__main__":
     indices = np.random.choice(len(train_context), size=int(len(train_context) * ratio), replace=False)
     train_context = train_context[indices]
     train_target  = train_target[indices]
-    train_sit = train_sit[indices]
-    train_emo = train_emo[indices]
+
+
 
     # ─── 加载模型 & Tokenizer ─────────────────────────────────────────────────────
     print(f"Loading model ...")
 
     tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=f"../../LLModel/{model_name}",
-        cache_dir=f'./{model_name}/',
+        pretrained_model_name_or_path="../../LLModel/llama3.1-8B-Instruct",
+        cache_dir='./llama3-8B/',
         force_download=False,
     )
 
@@ -458,10 +407,10 @@ if __name__ == "__main__":
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=f"../../LLModel/{model_name}",
+        pretrained_model_name_or_path="../../LLModel/llama3.1-8B-Instruct",
         torch_dtype=torch.float16,   # 显存不足可换 torch.bfloat16
         device_map="auto",           # 自动分配到 GPU / CPU
-        cache_dir=f'./{model_name}/',
+        cache_dir='./llama3-8B/',
         force_download=False,
     )
 
@@ -490,13 +439,13 @@ if __name__ == "__main__":
 
 
     # ── 微调（adapter 已存在则跳过，方便重复实验）────────────────────────────
-    run_dir = f"./LM_{model_name}/llama32_lora_empathy_{lr}_{int(ratio*100)}"
+    run_dir = f"./LM_llama3_8B/llama3_lora_empathy_Epoch3_no_kv_no_dosample_{lr}_{int(ratio*100)}"
     os.makedirs(run_dir, exist_ok=True)
 
     LORA_ADAPTER_PATH = os.path.join(run_dir, "final_adapter")
 
     if not os.path.exists(LORA_ADAPTER_PATH) or new_model_train:
-        emo_head = run_training(train_context, train_target, train_sit, train_emo, SYSTEM_PROMPT, SEED, run_dir)
+        run_training(train_context, train_target, SYSTEM_PROMPT, SEED, run_dir)
     else:
         print(f"Found existing LoRA adapter at '{LORA_ADAPTER_PATH}', skipping training.\n")
         model.load_adapter(LORA_ADAPTER_PATH, adapter_name="default")    # ← 加载保存的 adapter
@@ -552,11 +501,6 @@ if __name__ == "__main__":
         pred_tokens = generated.strip().split()
         all_pred_tokens_corpus.extend(pred_tokens)
 
-        # 记录单条评估结果
-        # instance_dist_1 = len(set(pred_tokens)) / len(pred_tokens) if len(pred_tokens) > 0 else 0
-        # instance_bigrams = list(zip(pred_tokens, pred_tokens[1:]))
-        # instance_dist_2 = len(set(instance_bigrams)) / len(instance_bigrams) if len(instance_bigrams) > 0 else 0
-
         all_results.append({
             "id": i,
             "history": history,
@@ -574,7 +518,13 @@ if __name__ == "__main__":
             }
         })
 
-    corpus_dist_1, corpus_dist_2 = calc_distinct([res["generated"] for res in all_results], tokenizer)
+    # ── 计算全部生成在 Corpus 级别的 Dist-1 / Dist-2 ─────────────────────────
+    if len(all_pred_tokens_corpus) > 0:
+        corpus_dist_1 = len(set(all_pred_tokens_corpus)) / len(all_pred_tokens_corpus)
+        bigrams = list(zip(all_pred_tokens_corpus, all_pred_tokens_corpus[1:]))
+        corpus_dist_2 = len(set(bigrams)) / len(bigrams) if len(bigrams) > 0 else 0
+    else:
+        corpus_dist_1, corpus_dist_2 = 0.0, 0.0
 
     print(f"Average PPL: {ppl_total / len(test_context):.4f}")
     print(f"Average Sample PPL: {sample_ppl_total / len(test_context):.4f}")
@@ -595,3 +545,5 @@ if __name__ == "__main__":
         for item in all_results:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
     print(f"Evaluation results saved to {output_jsonl_path}")
+    
+    

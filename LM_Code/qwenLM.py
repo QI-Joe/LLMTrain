@@ -38,7 +38,8 @@ class RecordTrainer(Trainer):
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
-            output_hidden_states=True
+            output_hidden_states=True,
+            use_cache=False,
         )
         
         loss = outputs.loss
@@ -146,7 +147,7 @@ def run_training(train_context: np.ndarray, train_target: np.ndarray, SYSTEM_PRO
     training_args = TrainingArguments(
         output_dir=os.path.join(run_dir, "checkpoints"),
         seed=SEED,
-        num_train_epochs=7,
+        num_train_epochs=3,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=8,       # effective batch size = 16
         learning_rate=lr,
@@ -217,12 +218,14 @@ def multi_turn_chat_with_ppl(
     inputs = tokenizer(context_text, return_tensors="pt").to(DEVICE)
 
     with torch.no_grad():
+        np.random.seed(SEED)
+        torch.manual_seed(SEED)
         output_ids = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
-            do_sample=True,
+            do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
         )
 
@@ -435,7 +438,7 @@ if __name__ == "__main__":
 
 
     # ── 微调（adapter 已存在则跳过，方便重复实验）────────────────────────────
-    run_dir = f"./LM_llama3_8B/llama3_lora_empathy_{lr}_{int(ratio*100)}"
+    run_dir = f"./LM_llama3_8B/llama3_lora_empathy_Epoch3_no_kv_no_dosample_{lr}_{int(ratio*100)}"
     os.makedirs(run_dir, exist_ok=True)
 
     LORA_ADAPTER_PATH = os.path.join(run_dir, "final_adapter")
@@ -541,3 +544,5 @@ if __name__ == "__main__":
         for item in all_results:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
     print(f"Evaluation results saved to {output_jsonl_path}")
+    
+    
