@@ -21,9 +21,9 @@ from peft import LoraConfig, get_peft_model, TaskType
 from ZGeneration.train_gen_fast_LM import calculate_per_sample_ppl
 import nltk
 from nltk.translate.bleu_score import sentence_bleu
-from data_module import EmpathyDataset as EmpathyDataset_old
-from data_module import IAMMDataCollator, EMOTION_MAP
-from train_module import EmotionHead
+from LM_Code.data_module import EmpathyDataset as EmpathyDataset_old
+from LM_Code.data_module import IAMMDataCollator, EMOTION_MAP
+from LM_Code.train_module import EmotionHead
 from src_analysis.metrics_func import calc_distinct
 import argparse
 

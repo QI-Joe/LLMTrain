@@ -1,82 +1,106 @@
 import os
 import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import json
 import random
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, TaskType
 import argparse
 
-from data_module import EmpathyDataset, IAMMDataCollator, EMOTION_MAP, EmpathyDatasetForPrediction, PredictionDataCollator
-from train_module import EmotionHead, IAMMTrainer, multi_turn_chat_with_ppl_batched, compute_sentence_bleu, compute_bleu
+from LM_Code.data_module import EMOTION_MAP, EmpathyDatasetForPrediction, PredictionDataCollator
+from LM_Code.train_module import EmotionHead
 from torch.utils.data import DataLoader
 
-def run_training(model, tokenizer, train_data, args_dict):
-    print("Building training dataset ...")
+REVERSE_EMOTION_MAP = {v: k for k, v in EMOTION_MAP.items()}
+
+def multi_turn_chat_with_ppl_batched(
+    model,
+    tokenizer,
+    DEVICE,
+    batch,
+    emo_head,
+    max_new_tokens=256,
+    temperature=0.7,
+    top_p=0.9,
+):
+    model.eval()
+    emo_head.eval()
     
-    contexts, targets, situations, emotions = train_data
+    context_input_ids = batch["context_input_ids"].to(DEVICE)
+    context_attention_mask = batch["context_attention_mask"].to(DEVICE)
+    full_input_ids = batch["full_input_ids"].to(DEVICE)
+    full_attention_mask = batch["full_attention_mask"].to(DEVICE)
+    full_labels = batch["full_labels"].to(DEVICE)
     
-    train_dataset = EmpathyDataset(
-        contexts=contexts,
-        targets=targets,
-        situations=situations,
-        emotion_labels=emotions,
-        tokenizer=tokenizer,
-        system_prompt=args_dict['SYSTEM_PROMPT'],
-        max_length=512,
-        sit_max_length=128
-    )
+    situation_input_ids = batch["situation_input_ids"].to(DEVICE)
+    situation_attention_mask = batch["situation_attention_mask"].to(DEVICE)
+    emotion_labels = batch["emotion_label"].to(DEVICE)
+
+    with torch.no_grad():
+        # Set manual seeds inside just like Explict_Prediction_topk.py
+        torch.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
+        output_ids = model.generate(
+            input_ids=context_input_ids,
+            attention_mask=context_attention_mask,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=False,
+            use_cache=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+
+    prompt_len = context_input_ids.shape[-1]
+    new_tokens_tensor = output_ids[:, prompt_len:]
+    generated_responses = tokenizer.batch_decode(new_tokens_tensor, skip_special_tokens=True)
     
-    print(f"Training samples: {len(train_dataset)}\n")
+    # EMOTION PREDICTION
+    with torch.no_grad():
+        sit_outputs = model(
+            input_ids=situation_input_ids,
+            attention_mask=situation_attention_mask,
+            output_hidden_states=True
+        )
+        last_hidden_states = sit_outputs.hidden_states[-1]
+        emo_logits = emo_head(last_hidden_states, attention_mask=situation_attention_mask)
+        top5_value, top_5_indices = torch.topk(emo_logits, k=5, dim=-1)
+        batch_first5 = top_5_indices.cpu().numpy().tolist()
+        emo_preds = torch.argmax(emo_logits, dim=-1).cpu().numpy().tolist()
 
-    training_args = TrainingArguments(
-        output_dir=os.path.join(args_dict['BASE_PATH'], args_dict['FOLDER_NAME']),
-        seed=args_dict['SEED'],
-        num_train_epochs=3,
-        per_device_train_batch_size=2, # 2 is original setting
-        gradient_accumulation_steps=8, # 8 is original setting, effective batch size = 16
-        learning_rate=args_dict['lr'],
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.05,
-        fp16=True,
-        gradient_checkpointing=True,
-        logging_steps=50,
-        save_steps=500,
-        save_total_limit=2,
-        report_to="none",
-        dataloader_num_workers=0,
-        remove_unused_columns=False,
-    )
+    # Step 2: Compute PPL
+    # with torch.no_grad():
+    #     logits = model(
+    #         input_ids=full_input_ids, 
+    #         attention_mask=full_attention_mask
+    #     ).logits
 
-    emo_head = EmotionHead(hidden_size=model.config.hidden_size, num_emotions=len(EMOTION_MAP))
-    data_collator = IAMMDataCollator(tokenizer=tokenizer)
+    # shift_logits = logits[..., :-1, :].contiguous()
+    # shift_labels = full_labels[..., 1:].contiguous()
 
-    trainer = IAMMTrainer(
-        emo_head=emo_head,
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        data_collator=data_collator,
-    )
-
-    print("Starting IAMM LoRA fine-tuning ...")
-    trainer.train()
-    print("Fine-tuning complete.\n")
-
-    model.save_pretrained(args_dict['LORA_ADAPTER_PATH'])
-    tokenizer.save_pretrained(args_dict['LORA_ADAPTER_PATH'])
-    emo_head.save(args_dict['LORA_ADAPTER_PATH'])
-    print(f"LoRA adapter saved → {args_dict['LORA_ADAPTER_PATH']}\n")
+    # sample_ppl_list = calculate_per_sample_ppl(logits, full_labels)
     
-    return emo_head
+    # loss_fct = torch.nn.CrossEntropyLoss(reduction="none", ignore_index=-100)
+    # losses = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+    
+    # batch_size = full_input_ids.size(0)
+    # losses = losses.view(batch_size, -1)
+    
+    # mask = (shift_labels != -100).float()
+    # seq_losses = (losses * mask).sum(dim=1) / mask.sum(dim=1)
+    # ppl_list = torch.exp(seq_losses).cpu().numpy().tolist()
+    # loss_list = seq_losses.cpu().numpy().tolist()
+
+    return generated_responses, emo_preds, batch_first5 #, loss_list, ppl_list, sample_ppl_list
+
 
 if __name__ == "__main__":
     # --- Configuration ---
     parser = argparse.ArgumentParser(description="Train and evaluate the IAMM model.")
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate for training.")
     parser.add_argument("--ratio", type=float, default=0.2, help="Ratio of training data to use.")
-    parser.add_argument("--new_model_train", action="store_true", help="Whether to train a new model or load existing adapter.")
     parser.add_argument("--task1", type=str, default="Gen", help="Task 1 name for folder naming.")
     parser.add_argument("--task2", type=str, default="ED", help="Task 2 name for folder naming.")
     args = parser.parse_args()
@@ -159,17 +183,13 @@ if __name__ == "__main__":
     print()
 
     # --- Training ---
-    if not os.path.exists(LORA_ADAPTER_PATH) or args.new_model_train:
-        emo_head = run_training(model, tokenizer, train_data, args_dict)
-    else:
-        print(f"Found existing LoRA adapter at '{LORA_ADAPTER_PATH}', skipping training.\n")
-        model.load_adapter(LORA_ADAPTER_PATH, adapter_name="default")
-        model.set_adapter("default")
-        
-        # We need the emo head even if skip training
-        emo_head = EmotionHead(hidden_size=model.config.hidden_size, num_emotions=len(EMOTION_MAP))
-        emo_head.load_state_dict(torch.load(os.path.join(LORA_ADAPTER_PATH, 'emotion_head.pt'), map_location=DEVICE))
+    print(f"Found existing LoRA adapter at '{LORA_ADAPTER_PATH}', skipping training.\n")
+    model.load_adapter(LORA_ADAPTER_PATH, adapter_name="default")
+    model.set_adapter("default")
     
+    # We need the emo head even if skip training
+    emo_head = EmotionHead(hidden_size=model.config.hidden_size, num_emotions=len(EMOTION_MAP)).half()
+    emo_head.load_state_dict(torch.load(os.path.join(LORA_ADAPTER_PATH, 'emotion_head.pt'), map_location=DEVICE))
     emo_head = emo_head.to(model.dtype)
 
     # --- Evaluation ---
@@ -194,9 +214,10 @@ if __name__ == "__main__":
     collate_fn = PredictionDataCollator(tokenizer)
     test_dataloader = DataLoader(test_prediction_dataset, batch_size=8, shuffle=False, collate_fn=collate_fn)
     
+    print("[Runing] Data preparation finished, lets go on batch evaluation ...")
     processed_samples = 0
     for batch_idx_num, batch in enumerate(test_dataloader):
-        generated_list, loss_list, ppl_list, sample_ppl_list, emo_preds = multi_turn_chat_with_ppl_batched(
+        generated_list, emo_preds, batch_frist5_emo = multi_turn_chat_with_ppl_batched(
             model=model,
             tokenizer=tokenizer,
             DEVICE=DEVICE,
@@ -211,45 +232,28 @@ if __name__ == "__main__":
             generated = generated_list[b_i]
             reference = batch["reference"][b_i]
             history = batch["history"][b_i]
-            ppl = ppl_list[b_i]
-            sample_ppl = sample_ppl_list[b_i]
-            loss = loss_list[b_i]
             sample_idx = batch["sample_idx"][b_i]
             
             emotion_idx = batch["emotion_label"][b_i].item()
             emo_pred = emo_preds[b_i]
+            emo_top5 = batch_frist5_emo[b_i]
 
             if emo_pred == emotion_idx:
                 emo_correct += 1
-
-            bleu1, bleu2, bleu3, bleu4 = compute_sentence_bleu(generated, reference)
-            qshb1, qshb2 = compute_bleu(generated, reference)
-
-            bleu1_total += bleu1; bleu2_total += bleu2; bleu3_total += bleu3; bleu4_total += bleu4
-            qshbleu1 += qshb1; qshbleu2 += qshb2
-            ppl_total += ppl; sample_ppl_total += sample_ppl
 
             all_results.append({
                 "id": sample_idx,
                 "history": history,
                 "reference": reference,
                 "generated": generated,
-                "emotion_label": next((k for k, v in EMOTION_MAP.items() if v == emotion_idx), str(emotion_idx)),
-                "emotion_pred": next((k for k, v in EMOTION_MAP.items() if v == emo_pred), str(emo_pred)),
-                "metrics": {
-                    "ppl": ppl, "sample_ppl": sample_ppl,
-                    "bleu1": bleu1, "bleu2": bleu2, "bleu3": bleu3, "bleu4": bleu4,
-                    "my_bleu1": qshb1, "my_bleu2": qshb2,
-                }
+                "emotion_label": REVERSE_EMOTION_MAP.get(emotion_idx, str(emotion_idx)),
+                "emotion_pred": REVERSE_EMOTION_MAP.get(emo_pred, str(emo_pred)),
+                "emotion_top5_list": [REVERSE_EMOTION_MAP.get(idx, str(idx)) for idx in emo_top5],
             })
             
             processed_samples += 1
-            if processed_samples % 100 == 0:
+            if processed_samples % 50 == 0:
                 print(f"Evaluated {processed_samples}/{len(test_context)} samples ...")
-                print(f"[Round {processed_samples}] Average PPL: {ppl_total / processed_samples:.4f}")
-                print(f"[Round {processed_samples}] Average Sample PPL: {sample_ppl_total / processed_samples:.4f}")
-                print(f"[Round {processed_samples}] Average BLEU-1: {bleu1_total / processed_samples:.4f}")
-                print(f"[Round {processed_samples}] Average BLEU-2: {bleu2_total / processed_samples:.4f}")
 
     unigrams = set()
     bigrams = set()
@@ -269,22 +273,9 @@ if __name__ == "__main__":
     corpus_dist_2 = len(bigrams) / total_bigrams if total_bigrams > 0 else 0.0
 
     print(f"Emotion Accuracy: {emo_correct / len(test_context):.4f}")
-    print(f"Average PPL: {ppl_total / len(test_context):.4f}")
-    print(f"Average Sample PPL: {sample_ppl_total / len(test_context):.4f}")
-    print(f"Average BLEU-1: {bleu1_total / len(test_context):.4f}")
-    print(f"Average BLEU-2: {bleu2_total / len(test_context):.4f}")
-    print(f"Average My BLEU-1: {qshbleu1 / len(test_context):.4f}")
-    print(f"Average My BLEU-2: {qshbleu2 / len(test_context):.4f}")
-    print(f"Corpus Dist-1: {corpus_dist_1:.4f}")
-    print(f"Corpus Dist-2: {corpus_dist_2:.4f}")
 
-    for item in all_results:
-        item["metrics"]["dist1_corpus"] = corpus_dist_1
-        item["metrics"]["dist2_corpus"] = corpus_dist_2
-        item["metrics"]["emotion_accuracy"] = emo_correct / len(test_context)
-    
-    output_jsonl_path = os.path.join(BASE_PATH, FOLDER_NAME, f"eval_results_{FOLDER_NAME}.jsonl")
-    with open(output_jsonl_path, "w", encoding="utf-8") as f:
-        for item in all_results:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
-    print(f"Evaluation results saved to {output_jsonl_path}")
+    output_json_path = os.path.join(BASE_PATH, FOLDER_NAME, f"eval_EMO_LABEL_{FOLDER_NAME}.json")
+    with open(output_json_path, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, ensure_ascii=False, indent=2)
+    print(f"Evaluation results saved to {output_json_path}")
+

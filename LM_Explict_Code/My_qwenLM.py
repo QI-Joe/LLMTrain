@@ -54,21 +54,20 @@ class RecordTrainer(Trainer):
         )
         
         loss = outputs.loss
-        '''
-        with torch.no_grad():
-            sit_outputs = model(
-                input_ids=situation_ids,
-                attention_mask=situation_mask,
-                output_hidden_states=True,
-                use_cache=False
-            )
-            
-            last_hidden_states = sit_outputs.hidden_states[-1]
-            device = last_hidden_states.device
-            
-            emo_logits = self.emo_head(last_hidden_states, attention_mask=situation_mask.to(device))
-            sit_emo_loss = self.loss_fct(emo_logits, emotion_labels.to(device))
-        '''
+
+        sit_outputs = model(
+            input_ids=situation_ids,
+            attention_mask=situation_mask,
+            output_hidden_states=True,
+            use_cache=False
+        )
+        
+        last_hidden_states = sit_outputs.hidden_states[-1]
+        device = last_hidden_states.device
+        
+        emo_logits = self.emo_head(last_hidden_states, attention_mask=situation_mask.to(device))
+        sit_emo_loss = self.loss_fct(emo_logits, emotion_labels.to(device))
+
         total_loss = loss # + 0.05 * sit_emo_loss # step try to lower the affection of emotion label
         
         if (self.state.global_step+1) % 100 == 0:  # 每 100 步保存一次
@@ -517,10 +516,10 @@ if __name__ == "__main__":
 
 
     # ── 微调（adapter 已存在则跳过，方便重复实验）────────────────────────────
-    run_dir = f"./LM_llama3_8B/llama3_{args.task1}_{lr}_{int(ratio*100)}"
+    run_dir = f"./llama3-8B/llama3_{args.task1}_{lr}_{int(ratio*100)}"
     os.makedirs(run_dir, exist_ok=True)
 
-    LORA_ADAPTER_PATH = os.path.join(run_dir, "final_adapter")
+    LORA_ADAPTER_PATH = os.path.join(run_dir, "adapter") # final_adapter
 
     if not os.path.exists(LORA_ADAPTER_PATH) or new_model_train:
         emo_head = run_training(train_context, train_target, train_sit, train_emo, SYSTEM_PROMPT, SEED, run_dir)
@@ -579,11 +578,6 @@ if __name__ == "__main__":
         pred_tokens = generated.strip().split()
         all_pred_tokens_corpus.extend(pred_tokens)
 
-        # 记录单条评估结果
-        # instance_dist_1 = len(set(pred_tokens)) / len(pred_tokens) if len(pred_tokens) > 0 else 0
-        # instance_bigrams = list(zip(pred_tokens, pred_tokens[1:]))
-        # instance_dist_2 = len(set(instance_bigrams)) / len(instance_bigrams) if len(instance_bigrams) > 0 else 0
-
         all_results.append({
             "id": i,
             "history": history,
@@ -631,3 +625,5 @@ if __name__ == "__main__":
         for item in all_results:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
     print(f"Evaluation results saved to {output_jsonl_path}")
+    
+    

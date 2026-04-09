@@ -5,6 +5,7 @@ from collections import Counter
 from transformers import Trainer
 import nltk
 from nltk.translate.bleu_score import sentence_bleu
+import torch.nn.functional as F
 
 class EmotionHead(nn.Module):
     def __init__(self, hidden_size, num_emotions):
@@ -15,15 +16,19 @@ class EmotionHead(nn.Module):
         self.output_layer2 = nn.Linear(hidden_size, num_emotions)
     
     def forward(self, enc_outputs, attention_mask=None):
+        # PEFT typically casts hidden states to float32 for numerical stability. 
+        # We cast it back to the same dtype as our linear layers.
+        enc_outputs = enc_outputs.to(self.attention_layer2.weight.dtype)
         projected = self.attention_layer2(enc_outputs)
         projected = nn.Tanh()(projected)
         attn_logits = self.attention_v2(projected).squeeze(2) # (B, L)
         
         if attention_mask is not None:
              mask_val = (1.0 - attention_mask.float()) * -10000.0
-             attn_logits = attn_logits + mask_val
-
-        scores = nn.Softmax(dim=-1)(attn_logits).unsqueeze(1)  # (batch_size, 1, seq_len)
+             attn_logits = attn_logits + mask_val.to(attn_logits.dtype)
+        
+        scores = F.softmax(attn_logits, dim=-1).unsqueeze(1) # (batch_size, 1, seq_len)
+        
         hidden_x = torch.bmm(scores, enc_outputs).squeeze(1)
         
         x = nn.Tanh()(self.hidden_layer2(hidden_x))
@@ -57,7 +62,8 @@ class IAMMTrainer(Trainer):
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
-            output_hidden_states=False
+            output_hidden_states=False,
+            use_cache=False,
         )
         ctx_loss = outputs.loss
         
@@ -65,30 +71,25 @@ class IAMMTrainer(Trainer):
         sit_outputs = model(
             input_ids=situation_ids,
             attention_mask=situation_mask,
-            output_hidden_states=True
+            output_hidden_states=True,
+            use_cache=False,
         )
         last_hidden_states = sit_outputs.hidden_states[-1]
         
         emo_logits = self.emo_head(last_hidden_states, attention_mask=situation_mask)
         sit_emo_loss = self.loss_fct(emo_logits, emotion_labels)
-        # emo_pred = torch.argmax(emo_logits, dim=-1)
         
         # We append our custom data to the outputs object to have access to them later via HF Trainer's flow.
         outputs.emo_logits = emo_logits
         outputs.emotion_labels = emotion_labels
         
-        # Save predictions in the trainer (useful for plotting metrics later on if evaluating)
-        # if not model.training:  # If we are in evaluation model
-        #     self.epoch_emo_preds.append(emo_pred.detach().cpu())
-        #     self.epoch_emo_labels.append(emotion_labels.detach().cpu())
-        
-        total_loss = ctx_loss # + sit_emo_loss
+        total_loss = ctx_loss + sit_emo_loss
         
         return (total_loss, outputs) if return_outputs else total_loss
 
     def create_optimizer(self):
         if self.optimizer is None:
-            params = list(self.model.parameters()) # + list(self.emo_head.parameters())
+            params = list(self.model.parameters()) + list(self.emo_head.parameters())
             from torch.optim import AdamW
             self.optimizer = AdamW(
                 params,
@@ -111,13 +112,11 @@ def calculate_per_sample_ppl(logits, labels):
     sample_losses = loss.sum(dim=1) / valid_lengths.float()
     return torch.exp(sample_losses).tolist()
 
-def multi_turn_chat_with_ppl(
+def multi_turn_chat_with_ppl_batched(
     model,
     tokenizer,
     DEVICE,
-    history,
-    reference_answer,
-    situation_text,
+    batch,
     emo_head,
     max_new_tokens=256,
     temperature=0.7,
@@ -125,72 +124,72 @@ def multi_turn_chat_with_ppl(
 ):
     model.eval()
     emo_head.eval()
-
-    # 1. GENERATION
-    context_text = tokenizer.apply_chat_template(
-        history,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    inputs = tokenizer(context_text, return_tensors="pt").to(DEVICE)
+    
+    context_input_ids = batch["context_input_ids"].to(DEVICE)
+    context_attention_mask = batch["context_attention_mask"].to(DEVICE)
+    full_input_ids = batch["full_input_ids"].to(DEVICE)
+    full_attention_mask = batch["full_attention_mask"].to(DEVICE)
+    full_labels = batch["full_labels"].to(DEVICE)
+    
+    situation_input_ids = batch["situation_input_ids"].to(DEVICE)
+    situation_attention_mask = batch["situation_attention_mask"].to(DEVICE)
+    emotion_labels = batch["emotion_label"].to(DEVICE)
 
     with torch.no_grad():
+        # Set manual seeds inside just like Explict_Prediction_topk.py
+        torch.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
         output_ids = model.generate(
-            **inputs,
+            input_ids=context_input_ids,
+            attention_mask=context_attention_mask,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
+            do_sample=False,
+            use_cache=False,
             pad_token_id=tokenizer.eos_token_id,
-            do_sample=True,
         )
 
-    new_tokens = output_ids[0][inputs["input_ids"].shape[-1]:]
-    generated_response = tokenizer.decode(new_tokens, skip_special_tokens=True)
-
-    # 2. EMOTION PREDICTION
-    sit_inputs = tokenizer(
-        situation_text,
-        max_length=128,
-        truncation=True,
-        return_tensors="pt"
-    ).to(DEVICE)
+    prompt_len = context_input_ids.shape[-1]
+    new_tokens_tensor = output_ids[:, prompt_len:]
+    generated_responses = tokenizer.batch_decode(new_tokens_tensor, skip_special_tokens=True)
     
+    # EMOTION PREDICTION
     with torch.no_grad():
         sit_outputs = model(
-            input_ids=sit_inputs["input_ids"],
-            attention_mask=sit_inputs["attention_mask"],
+            input_ids=situation_input_ids,
+            attention_mask=situation_attention_mask,
             output_hidden_states=True
         )
         last_hidden_states = sit_outputs.hidden_states[-1]
-        emo_logits = emo_head(last_hidden_states, attention_mask=sit_inputs["attention_mask"])
-        emo_pred = torch.argmax(emo_logits, dim=-1).item()
+        emo_logits = emo_head(last_hidden_states, attention_mask=situation_attention_mask)
+        emo_preds = torch.argmax(emo_logits, dim=-1).cpu().numpy().tolist()
 
-    # 3. PPL CALCULATION
-    full_text = tokenizer.apply_chat_template(
-        history + [{"role": "assistant", "content": reference_answer}],
-        tokenize=False,
-        add_generation_prompt=False,
-    )
-
-    full_ids = tokenizer(full_text, return_tensors="pt")["input_ids"].to(DEVICE)
-    context_ids = tokenizer(context_text, return_tensors="pt")["input_ids"].to(DEVICE)
-    context_len = context_ids.shape[1]
-
+    # Step 2: Compute PPL
     with torch.no_grad():
-        logits = model(full_ids).logits
+        logits = model(
+            input_ids=full_input_ids, 
+            attention_mask=full_attention_mask
+        ).logits
 
-    shift_logits = logits[0, context_len - 1 : -1, :]
-    shift_labels = full_ids[0, context_len:]
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = full_labels[..., 1:].contiguous()
 
-    loss = nn.CrossEntropyLoss(reduction="mean")(shift_logits, shift_labels)
+    sample_ppl_list = calculate_per_sample_ppl(logits, full_labels)
     
-    ppl = torch.exp(loss).item()
+    loss_fct = nn.CrossEntropyLoss(reduction="none", ignore_index=-100)
+    losses = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+    
+    batch_size = full_input_ids.size(0)
+    losses = losses.view(batch_size, -1)
+    
+    mask = (shift_labels != -100).float()
+    seq_losses = (losses * mask).sum(dim=1) / mask.sum(dim=1)
+    ppl_list = torch.exp(seq_losses).cpu().numpy().tolist()
+    loss_list = seq_losses.cpu().numpy().tolist()
 
-    full_labels = full_ids.clone()
-    full_labels[0, :context_len] = -100
-    sample_ppl = calculate_per_sample_ppl(logits, full_labels)[0]
+    return generated_responses, loss_list, ppl_list, sample_ppl_list, emo_preds
 
-    return generated_response, loss.item(), ppl, sample_ppl, emo_pred
 
 def _modified_precision(hypothesis, reference, n):
     hyp_ngrams = (

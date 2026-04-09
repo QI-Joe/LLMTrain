@@ -25,7 +25,7 @@ import argparse
 
 from LM_Code.data_module import EmpathyDataset as EmpathyDataset_old
 from LM_Code.data_module import IAMMDataCollator, EMOTION_MAP
-from LM_Code.data_module import EmotionHead
+from LM_Code.train_module import EmotionHead
 from src_analysis.metrics_func import calc_distinct
 
 class RecordTrainer(Trainer):
@@ -379,10 +379,6 @@ def compute_bleu(pred_t, ref_t):
     if len(ref_toks) == 0 or len(pred_toks) == 0:
         b1, b2 = 0.0, 0.0
     else:
-        # Use method 7 (Geometric Mean) often better for single reference short text
-        # method 1 (epsilon) can be harsh if 1-gram precision is low.
-        # But also check simple exact match ratio or unigram overlap without penalty to debug.
-        
         # Trying Method 7 as it interpolates methods 4 and 5 (length smoothing + average counts)
         b1 = sentence_bleu([ref_toks], pred_toks, weights=(1, 0, 0, 0), )
         b2 = sentence_bleu([ref_toks], pred_toks, weights=(0.5, 0.5, 0, 0), )
@@ -395,6 +391,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train and evaluate the model.")
     parser.add_argument('--ratio', type=float, default = 0.1, help = "dataset ratio")
     parser.add_argument('--model_name', type=str, default = 'llama-3.2-1B')
+    parser.add_argument('--new_model_train', action='store_true', help='Whether to train a new model even if an adapter already exists.')
+    parser.add_argument('--task1', type=str, default='new_test', help='Task name for logging and saving purposes.')
     
     args = parser.parse_args()
 
@@ -495,7 +493,7 @@ if __name__ == "__main__":
 
 
     # ── 微调（adapter 已存在则跳过，方便重复实验）────────────────────────────
-    run_dir = f"./LM_{model_name}/llama32_lora_empathy_{lr}_{int(ratio*100)}"
+    run_dir = f"./LM_{model_name}/{model_name}_{args.task1}_{lr}_{int(ratio*100)}"
     os.makedirs(run_dir, exist_ok=True)
 
     LORA_ADAPTER_PATH = os.path.join(run_dir, "final_adapter")
@@ -557,11 +555,6 @@ if __name__ == "__main__":
         pred_tokens = generated.strip().split()
         all_pred_tokens_corpus.extend(pred_tokens)
 
-        # 记录单条评估结果
-        # instance_dist_1 = len(set(pred_tokens)) / len(pred_tokens) if len(pred_tokens) > 0 else 0
-        # instance_bigrams = list(zip(pred_tokens, pred_tokens[1:]))
-        # instance_dist_2 = len(set(instance_bigrams)) / len(instance_bigrams) if len(instance_bigrams) > 0 else 0
-
         all_results.append({
             "id": i,
             "history": history,
@@ -574,8 +567,8 @@ if __name__ == "__main__":
                 "bleu2": bleu2,
                 "bleu3": bleu3,
                 "bleu4": bleu4,
-                "my_bleu1": qshb1,
-                "my_bleu2": qshb2,
+                # "my_bleu1": qshb1,
+                # "my_bleu2": qshb2,
             }
         })
 
